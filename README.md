@@ -4,7 +4,7 @@ Pocket Concierge is a buyer/User Agent orchestrator for household missions.
 
 The pre-hackathon baseline supports one action: a user-approved Nigerian bill purchase through Pocket Bills and the OKX Agent Payments Protocol. It plans the action, creates deterministic mission/cycle identifiers, waits for explicit approval, returns a buyer-side execution instruction, and verifies the token-scoped Pocket Bills status response.
 
-It never:
+The hosted Concierge service never:
 
 - signs an OKX payment;
 - holds an Agentic Wallet;
@@ -58,16 +58,35 @@ Content-Type: application/json
 
 Use [openapi.yaml](./openapi.yaml) as the machine-readable contract and [examples/mission.json](./examples/mission.json) as a copy-paste request. The baseline boundary is recorded in [docs/PRE_HACKATHON_BASELINE.md](./docs/PRE_HACKATHON_BASELINE.md).
 
-The local preparation client keeps the household reference out of Concierge and produces the exact Onchain OS quote/pay argument set:
+The local buyer client keeps the household reference out of Concierge and implements three deliberately separate phases:
 
 ```powershell
 $env:CONCIERGE_BASE_URL='http://127.0.0.1:4310'
 $env:POCKET_CONCIERGE_AGENT_KEY='replace-with-your-agent-key'
+$env:POCKET_CONCIERGE_LOCAL_BINDING_KEY='replace-with-a-separate-long-local-secret'
+
+# 1. Preview the immutable mission. No quote or payment.
 node examples/prepare-okx-bill.mjs examples/mission.json examples/private-inputs.example.json
-node examples/prepare-okx-bill.mjs examples/mission.json .\private-inputs.json --approve
+
+# 2. After approving the mission, obtain and validate a fresh quote. No signing or payment.
+node examples/prepare-okx-bill.mjs examples/mission.json .\private-inputs.json `
+  --approve --quote --state .\.data\family-week.quote.json
+
+# 3. Only after reviewing the displayed network, token, amount, recipient, and ceiling:
+node examples/prepare-okx-bill.mjs examples/mission.json .\private-inputs.json `
+  --approve --confirm-payment --state .\.data\family-week.quote.json
 ```
 
-The second command still does not sign or pay. It prepares a quote command and a pay template without `--yes`. The buyer must compare the fresh quote against `maximumUsdt`, show it to the user, and obtain explicit confirmation before any fund-moving command.
+The quote state is authenticated against the exact mission and private merchant request. It expires after four minutes. Immediately before invoking the fund-moving command, the client irreversibly marks it `payment_in_progress`, preventing a blind second payment after a crash or ambiguous CLI result.
+
+After success, the Pocket Bills status proof is encrypted locally with AES-256-GCM until Concierge verifies delivery. If verification is temporarily unavailable, retry only the proof:
+
+```powershell
+node examples/prepare-okx-bill.mjs examples/mission.json .\private-inputs.json `
+  --approve --resume-verification --state .\.data\family-week.quote.json
+```
+
+Never re-run `--confirm-payment` for a state marked `payment_in_progress`, `paid_response_received`, or `paid_pending_verification`.
 
 ## Persistence
 
