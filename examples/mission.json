@@ -22,7 +22,7 @@
       "dueAt": "2026-07-25T03:00:00.000Z",
       "category": "data",
       "serviceId": "mtn-data",
-      "variationCode": "mtn-100mb",
+      "variationCode": "mtn-10mb-100",
       "privateInputRef": "family-mum-mobile",
       "maximumUsdt": "0.25"
     }

@@ -126,10 +126,14 @@ if (!options.approve) {
   process.exit(0)
 }
 
-await request(
-  `/v1/missions/${encodeURIComponent(created.mission.externalId)}/actions/${encodeURIComponent(action.actionId)}/approve`,
-  { manifestId: created.mission.manifestId },
-)
+if (action.state === 'planned') {
+  await request(
+    `/v1/missions/${encodeURIComponent(created.mission.externalId)}/actions/${encodeURIComponent(action.actionId)}/approve`,
+    { manifestId: created.mission.manifestId },
+  )
+} else if (action.state !== 'approved' && action.state !== 'executing') {
+  throw new Error(`Action in ${action.state} state cannot prepare or resume payment.`)
+}
 const started = await request(
   `/v1/missions/${encodeURIComponent(created.mission.externalId)}/actions/${encodeURIComponent(action.actionId)}/start`,
   {},
@@ -247,7 +251,18 @@ if (options.confirmPayment) {
   ], privateValues)
   if (paid?.ok !== true || paid?.data?.status !== 'success') {
     const status = String(paid?.data?.status || 'unknown')
-    throw new Error(`Payment did not complete successfully (status: ${status}). Do not retry blindly.`)
+    let paymentError = String(paid?.data?.error || paid?.error || 'No payment error was returned.')
+    for (const value of privateValues.filter(Boolean)) paymentError = paymentError.replaceAll(String(value), '[PRIVATE]')
+    paymentError = paymentError.replace(/\s+/g, ' ').trim().slice(0, 500)
+    await saveState(options.statePath, {
+      ...unsignedState(inProgressState),
+      phase: 'payment_failed',
+      failedAt: new Date().toISOString(),
+      paymentStatus: status,
+      paymentError,
+      txHash: paid?.data?.txHash || null,
+    })
+    throw new Error(`Payment did not complete successfully (status: ${status}): ${paymentError}. Do not retry this paymentId.`)
   }
   const receiptState = await saveState(options.statePath, {
     ...unsignedState(inProgressState),
