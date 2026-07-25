@@ -7,6 +7,9 @@ export const OKX_AUTHORITY_PROOF_FEE_ATOMIC = '0'
 export const XLAYER_USDT0 = '0x779ded0c9e1022225f8e0630b35a9b54be713736'
 
 export function buildOkxAuthorityProof(receipt: AuthorityReceipt, transaction: string, baseUrl: string) {
+  const { verification: _embeddedVerification, ...canonicalReceipt } = receipt as AuthorityReceipt & {
+    verification?: unknown
+  }
   return {
     ok: true,
     service: {
@@ -34,14 +37,14 @@ export function buildOkxAuthorityProof(receipt: AuthorityReceipt, transaction: s
     },
     proof: {
       transaction,
-      settlementId: receipt.execution.settlementId,
-      settlementState: receipt.execution.state,
-      downstreamReceiptHash: receipt.execution.receiptHash,
-      maximumAuthorizedUsdt: receipt.limit.maximumUsdt,
-      decision: receipt.decision,
-      authorityReceipt: receipt,
-      receiptVerification: verifyAuthorityReceipt(receipt),
-      publicReceiptUrl: `${baseUrl}/v1/authority/receipts/${receipt.receiptId}`,
+      settlementId: canonicalReceipt.execution.settlementId,
+      settlementState: canonicalReceipt.execution.state,
+      downstreamReceiptHash: canonicalReceipt.execution.receiptHash,
+      maximumAuthorizedUsdt: canonicalReceipt.limit.maximumUsdt,
+      decision: canonicalReceipt.decision,
+      authorityReceipt: canonicalReceipt,
+      receiptVerification: verifyAuthorityReceipt(canonicalReceipt),
+      publicReceiptUrl: `${baseUrl}/v1/authority/receipts/${canonicalReceipt.receiptId}`,
     },
   }
 }

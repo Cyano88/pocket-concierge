@@ -115,10 +115,15 @@ test('authority proof endpoint advertises the required zero-fee EIP-3009 USDT ac
 })
 
 test('paid replay proof is recomputable and privacy-limited', () => {
-  const proof = buildOkxAuthorityProof(receipt, transaction, 'https://concierge.example.com')
+  const decoratedReceipt = {
+    ...receipt,
+    verification: { valid: true, expectedHash: receipt.receiptHash },
+  }
+  const proof = buildOkxAuthorityProof(decoratedReceipt, transaction, 'https://concierge.example.com')
   assert.equal(proof.proof.transaction, transaction)
   assert.equal(proof.proof.settlementId, 'pst_test')
   assert.equal(proof.proof.receiptVerification.valid, true)
+  assert.equal('verification' in proof.proof.authorityReceipt, false)
   assert.deepEqual(proof.integration.authorityOutcomes, ['APPROVE', 'ESCALATE', 'BLOCK'])
   const serialized = JSON.stringify(proof)
   assert.equal(serialized.includes('phone'), true)
