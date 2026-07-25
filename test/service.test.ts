@@ -214,6 +214,38 @@ test('verifies delivered Pocket Bills evidence and discards the status token', a
   assert.equal(JSON.stringify(verified).includes('one-time-status-secret'), false)
 })
 
+test('accepts the single okx namespace added by Pocket Bills to the external order id', async () => {
+  const store = new MemoryMissionStore()
+  let expectedExternalOrderId = ''
+  const app = new ConciergeService({
+    store,
+    now: () => now,
+    fetchJson: async () => ({
+      ok: true,
+      settlement: {
+        settlementId: 'pst_prefixed',
+        externalOrderId: `okx:${expectedExternalOrderId}`,
+        state: 'delivered',
+        receiptHash: 'receipt-prefixed',
+      },
+    }),
+  })
+  const created = await app.create(ownerId, mission({ externalId: 'prefixed-order' }))
+  const action = created.mission.actions[0]!
+  await app.approve(ownerId, created.mission.externalId, action.actionId, {
+    manifestId: created.mission.manifestId,
+  })
+  await app.start(ownerId, created.mission.externalId, action.actionId)
+  const persisted = await app.get(ownerId, created.mission.externalId)
+  expectedExternalOrderId = persisted.actions[0]!.downstreamExternalOrderId
+  const verified = await app.verify(ownerId, created.mission.externalId, action.actionId, {
+    statusUrl: 'https://bills.hashpaylink.com/v1/okx/settlements/pst_prefixed',
+    statusToken: 'private-status-token',
+  })
+  assert.equal(verified.actions[0]?.state, 'delivered')
+  assert.equal(verified.actions[0]?.evidence?.externalOrderId, `okx:${expectedExternalOrderId}`)
+})
+
 test('rejects status URL SSRF, mismatched orders, and non-terminal evidence', async () => {
   const build = async (fetchResult: unknown) => {
     const { app, store } = service(fetchResult)

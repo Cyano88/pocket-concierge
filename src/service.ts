@@ -188,7 +188,9 @@ export class ConciergeService {
     const downstreamExternalId = clean(settlement?.externalOrderId, 128)
     const state = clean(settlement?.state, 80)
     const receiptHash = clean(settlement?.receiptHash, 160)
-    if (status?.ok !== true || !settlementId || downstreamExternalId !== action.downstreamExternalOrderId || !state) {
+    const externalOrderMatches = downstreamExternalId === action.downstreamExternalOrderId
+      || downstreamExternalId === `okx:${action.downstreamExternalOrderId}`
+    if (status?.ok !== true || !settlementId || !externalOrderMatches || !state) {
       throw new ConciergeError('DOWNSTREAM_EVIDENCE_INVALID', 'Pocket Bills returned evidence that does not match this mission action.', 502)
     }
     if (TERMINAL_DELIVERED.has(state) && !receiptHash) {
