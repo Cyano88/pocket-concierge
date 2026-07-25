@@ -15,6 +15,8 @@
     "build": "tsc -p tsconfig.json"
   },
   "dependencies": {
+    "@okxweb3/x402-core": "^0.1.0",
+    "@okxweb3/x402-evm": "^0.2.1",
     "tsx": "^4.23.0"
   },
   "devDependencies": {

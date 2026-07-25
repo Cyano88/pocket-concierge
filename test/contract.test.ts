@@ -16,6 +16,7 @@ test('OpenAPI publishes every implemented route and no Prava action', async () =
   assert.ok(document.paths?.['/v1/missions/{externalId}/actions/{actionId}/start']?.post)
   assert.ok(document.paths?.['/v1/missions/{externalId}/actions/{actionId}/verify']?.post)
   assert.ok(document.paths?.['/v1/authority/receipts/{receiptId}']?.get)
+  assert.ok(document.paths?.['/v1/okx/authority-proof']?.get)
   assert.equal(source.includes('prava_shop'), false)
 })
 

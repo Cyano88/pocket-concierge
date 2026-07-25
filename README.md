@@ -4,6 +4,8 @@ Pocket Concierge is a deterministic authority and buyer-agent orchestrator for h
 
 Its first adapter supports a user-approved Nigerian bill purchase through Pocket Bills and the OKX Agent Payments Protocol. Before execution, a versioned mandate checks time, category, service, opaque recipient, action count, per-action spend, total mission spend, and approval threshold. The deterministic result is `APPROVE`, `ESCALATE`, or `BLOCK`; no LLM decides whether payment is allowed.
 
+For OKX marketplace testing, `GET /v1/okx/authority-proof` always begins with a zero-fee x402 challenge. The required signed replay returns the privacy-safe proof of a real delivered mission: payment transaction, downstream settlement, deterministic decision trace, recomputable authority receipt, and the five-minute integration contract. This public proof route never accepts or returns household account data.
+
 The hosted Concierge service never:
 
 - signs an OKX payment;
@@ -124,6 +126,13 @@ Required service variables:
 POCKET_CONCIERGE_AGENT_KEYS=<owner-id>:<long-random-agent-secret>
 POCKET_CONCIERGE_DB_PATH=/data/concierge.sqlite
 RAILPACK_NODE_VERSION=24.18.0
+OKX_API_KEY=<OKX developer credential>
+OKX_SECRET_KEY=<OKX developer credential>
+OKX_PASSPHRASE=<OKX developer credential>
+POCKET_CONCIERGE_PUBLIC_URL=https://pocket-concierge-production.up.railway.app
+POCKET_CONCIERGE_OKX_PAY_TO=<X Layer wallet address>
+POCKET_CONCIERGE_DEMO_RECEIPT_ID=<verified public receipt id>
+POCKET_CONCIERGE_DEMO_TX_HASH=<verified X Layer payment transaction>
 ```
 
 The agent secret must be generated in Railway or another secret manager. Never commit it or the local binding key.

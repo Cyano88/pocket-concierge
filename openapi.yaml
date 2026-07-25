@@ -8,6 +8,24 @@ servers:
 security:
   - bearerAuth: []
 paths:
+  /v1/okx/authority-proof:
+    get:
+      operationId: getOkxAuthorityProof
+      summary: Retrieve the verified governed-purchase proof after the required signed replay
+      responses:
+        "200":
+          description: Privacy-safe authority decision, settlement evidence, and integration contract
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [ok, service, integration, proof]
+        "402":
+          description: Zero-fee x402 payment challenge on X Layer; signed replay is required
+          headers:
+            PAYMENT-REQUIRED:
+              required: true
+              schema: { type: string }
   /health:
     get:
       security: []
