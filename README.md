@@ -58,6 +58,17 @@ Content-Type: application/json
 
 Use [openapi.yaml](./openapi.yaml) as the machine-readable contract and [examples/mission.json](./examples/mission.json) as a copy-paste request. The baseline boundary is recorded in [docs/PRE_HACKATHON_BASELINE.md](./docs/PRE_HACKATHON_BASELINE.md).
 
+The local preparation client keeps the household reference out of Concierge and produces the exact Onchain OS quote/pay argument set:
+
+```powershell
+$env:CONCIERGE_BASE_URL='http://127.0.0.1:4310'
+$env:POCKET_CONCIERGE_AGENT_KEY='replace-with-your-agent-key'
+node examples/prepare-okx-bill.mjs examples/mission.json examples/private-inputs.example.json
+node examples/prepare-okx-bill.mjs examples/mission.json .\private-inputs.json --approve
+```
+
+The second command still does not sign or pay. It prepares a quote command and a pay template without `--yes`. The buyer must compare the fresh quote against `maximumUsdt`, show it to the user, and obtain explicit confirmation before any fund-moving command.
+
 ## Persistence
 
 Set `POCKET_CONCIERGE_DB_PATH=.data/concierge.sqlite` to enable durable SQLite storage with WAL and optimistic revision checks. Without it, the service intentionally uses an in-memory store for local tests.
