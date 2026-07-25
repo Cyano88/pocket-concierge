@@ -2,6 +2,18 @@
   "externalId": "family-week-2026-07-25",
   "title": "Keep the family connected",
   "timezone": "Africa/Lagos",
+  "mandate": {
+    "policyVersion": "1",
+    "validFrom": "2026-07-25T00:00:00.000Z",
+    "expiresAt": "2026-08-01T00:00:00.000Z",
+    "allowedCategories": ["data"],
+    "allowedServiceIds": ["mtn-data"],
+    "allowedPrivateInputRefs": ["family-mum-mobile"],
+    "maximumPerActionUsdt": "0.25",
+    "maximumMissionUsdt": "0.25",
+    "approvalThresholdUsdt": "0.25",
+    "maximumActions": 1
+  },
   "actions": [
     {
       "type": "okx_bill",

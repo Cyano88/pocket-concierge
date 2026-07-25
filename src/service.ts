@@ -1,6 +1,7 @@
 import { ConciergeError } from './errors.js'
+import { buildAuthorityReceipt, evaluateAuthority, verifyAuthorityReceipt } from './authority.js'
 import type { MissionStore } from './store.js'
-import type { BillsStatusResponse, Mission, MissionAction } from './types.js'
+import type { AuthorityException, BillsStatusResponse, Mission, MissionAction } from './types.js'
 import { clean, digest, parseMission } from './validation.js'
 
 const BILLS_ORIGIN = 'https://bills.hashpaylink.com'
@@ -52,13 +53,35 @@ export class ConciergeService {
     return publicMission(await this.requireMission(ownerId, externalId))
   }
 
-  async approve(ownerId: string, externalId: string, actionId: string, manifestId: string) {
+  async getReceipt(receiptId: string) {
+    const receipt = await this.dependencies.store.getReceipt(receiptId)
+    if (!receipt) throw new ConciergeError('RECEIPT_NOT_FOUND', 'Authority receipt was not found.', 404)
+    return { ...receipt, verification: verifyAuthorityReceipt(receipt) }
+  }
+
+  async approve(ownerId: string, externalId: string, actionId: string, raw: unknown) {
     const mission = await this.requireMission(ownerId, externalId)
+    const input = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : {}
+    const manifestId = clean(input.manifestId, 128)
     if (mission.manifestId !== manifestId) throw new ConciergeError('MANIFEST_MISMATCH', 'Approval does not match the immutable mission manifest.', 409)
     const action = this.requireAction(mission, actionId)
     if (action.state === 'delivered') return publicMission(mission)
     if (action.state !== 'planned' && action.state !== 'approved') {
       throw new ConciergeError('ACTION_NOT_APPROVABLE', `Action in ${action.state} state cannot be approved.`, 409)
+    }
+    this.assertMandateActive(mission)
+    if (action.authorityDecision.outcome === 'BLOCK') {
+      throw new ConciergeError('AUTHORITY_BLOCKED', `Mandate blocked this action: ${action.authorityDecision.reasons.join(', ')}.`, 409)
+    }
+    if (action.authorityDecision.outcome === 'ESCALATE') {
+      const needsException = !action.authorityException
+        || (action.authorityException.consumedAt === null && Date.parse(action.authorityException.expiresAt) <= this.dependencies.now())
+      if (needsException) {
+        if (!input.exception) {
+          throw new ConciergeError('AUTHORITY_EXCEPTION_REQUIRED', 'This action exceeds the automatic approval threshold and needs a current exact one-use exception.', 409)
+        }
+        action.authorityException = this.parseException(mission, action, input.exception)
+      }
     }
     if (action.state === 'planned') {
       const expectedRevision = mission.revision
@@ -82,9 +105,21 @@ export class ConciergeService {
       throw new ConciergeError('ACTION_NOT_DUE', 'Action is approved but not due yet.', 409)
     }
     if (action.state === 'approved') {
+      this.assertMandateActive(mission)
+      if (action.authorityDecision.outcome === 'BLOCK') {
+        throw new ConciergeError('AUTHORITY_BLOCKED', 'The mandate blocks this action.', 409)
+      }
+      if (action.authorityDecision.outcome === 'ESCALATE') {
+        const exception = action.authorityException
+        if (!exception) throw new ConciergeError('AUTHORITY_EXCEPTION_REQUIRED', 'This action requires an exact human exception.', 409)
+        if (Date.parse(exception.expiresAt) <= this.dependencies.now()) {
+          throw new ConciergeError('AUTHORITY_EXCEPTION_EXPIRED', 'The one-use authority exception has expired.', 409)
+        }
+      }
       const expectedRevision = mission.revision
       action.state = 'executing'
       action.startedAt = iso(this.dependencies.now())
+      if (action.authorityException) action.authorityException.consumedAt = action.startedAt
       mission.updatedAt = action.startedAt
       mission.revision += 1
       await this.dependencies.store.update(mission, expectedRevision)
@@ -113,6 +148,9 @@ export class ConciergeService {
       },
       safety: {
         maximumUsdt: action.maximumUsdt,
+        authorityDecisionId: action.authorityDecision.decisionId,
+        authorityOutcome: action.authorityDecision.outcome,
+        exceptionId: action.authorityException?.exceptionId ?? null,
         instruction: 'Obtain a fresh quote, show the exact charge to the user, and stop unless the user confirms.',
       },
       verification: {
@@ -168,12 +206,14 @@ export class ConciergeService {
       receiptHash: receiptHash || null,
       verifiedAt: iso(this.dependencies.now()),
     }
+    const receipt = buildAuthorityReceipt(mission, action)
+    action.authorityReceiptId = receipt.receiptId
     mission.state = mission.actions.every(item => item.state === 'delivered')
       ? 'delivered'
       : mission.actions.some(item => item.state === 'needs_review') ? 'needs_review' : 'active'
     mission.updatedAt = action.evidence.verifiedAt
     mission.revision += 1
-    await this.dependencies.store.update(mission, expectedRevision)
+    await this.dependencies.store.update(mission, expectedRevision, receipt)
     return publicMission(mission)
   }
 
@@ -182,7 +222,8 @@ export class ConciergeService {
     const manifestId = digest(core)
     const now = iso(this.dependencies.now())
     const missionId = `pm_${digest({ ownerId, externalId: input.externalId }).slice(0, 24)}`
-    const actions: MissionAction[] = input.actions.map((action, index) => {
+    const mandateId = `pmnd_${digest(input.mandate).slice(0, 32)}`
+    const actionPlans = input.actions.map(action => {
       const actionId = `pa_${digest({ missionId, reference: action.reference }).slice(0, 20)}`
       const cycleDate = action.dueAt.slice(0, 10)
       return {
@@ -193,22 +234,39 @@ export class ConciergeService {
         state: 'planned',
         approvedAt: null,
         startedAt: null,
+        authorityException: null,
         evidence: null,
+        authorityReceiptId: null,
       }
     })
-    return {
+    const authorityContext = {
+      mandate: input.mandate,
+      mandateId,
+      manifestId,
+      actions: actionPlans,
+    }
+    const actions: MissionAction[] = actionPlans.map(action => ({
+      ...action,
+      state: 'planned',
+      authorityException: null,
+      authorityDecision: evaluateAuthority(authorityContext, action, action.dueAt),
+    }))
+    const mission: Mission = {
       revision: 0,
       missionId,
       manifestId,
+      mandateId,
       ownerId,
       externalId: input.externalId,
       title: input.title,
       timezone: input.timezone,
+      mandate: input.mandate,
       state: 'planned',
       createdAt: now,
       updatedAt: now,
       actions,
     }
+    return mission
   }
 
   private async requireMission(ownerId: string, externalId: string) {
@@ -221,6 +279,59 @@ export class ConciergeService {
     const action = mission.actions.find(item => item.actionId === actionId)
     if (!action) throw new ConciergeError('ACTION_NOT_FOUND', 'Mission action was not found.', 404)
     return action
+  }
+
+  private assertMandateActive(mission: Mission) {
+    const now = this.dependencies.now()
+    if (now < Date.parse(mission.mandate.validFrom)) {
+      throw new ConciergeError('MANDATE_NOT_YET_VALID', 'The mandate is not active yet.', 409)
+    }
+    if (now >= Date.parse(mission.mandate.expiresAt)) {
+      throw new ConciergeError('MANDATE_EXPIRED', 'The mandate has expired.', 409)
+    }
+  }
+
+  private parseException(mission: Mission, action: MissionAction, raw: unknown): AuthorityException {
+    const input = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : {}
+    const decisionId = clean(input.decisionId, 128)
+    const nonce = clean(input.nonce, 128)
+    const approvedMaximumUsdt = clean(input.approvedMaximumUsdt, 32)
+    const expiresAtInput = clean(input.expiresAt, 40)
+    const expiresAtMs = Date.parse(expiresAtInput)
+    if (decisionId !== action.authorityDecision.decisionId) {
+      throw new ConciergeError('AUTHORITY_DECISION_MISMATCH', 'Exception does not match the action authority decision.', 409)
+    }
+    if (!/^[a-zA-Z0-9:_-]{8,128}$/.test(nonce)) {
+      throw new ConciergeError('AUTHORITY_NONCE_INVALID', 'Exception nonce must be 8-128 safe characters.')
+    }
+    if (approvedMaximumUsdt !== action.maximumUsdt) {
+      throw new ConciergeError('AUTHORITY_AMOUNT_MISMATCH', 'Exception must approve the action exact maximumUsdt.', 409)
+    }
+    if (!Number.isFinite(expiresAtMs) || expiresAtMs <= this.dependencies.now() || expiresAtMs > Date.parse(mission.mandate.expiresAt)) {
+      throw new ConciergeError('AUTHORITY_EXPIRY_INVALID', 'Exception expiry must be in the future and no later than the mandate expiry.')
+    }
+    const approvedAt = iso(this.dependencies.now())
+    const expiresAt = new Date(expiresAtMs).toISOString()
+    const nonceHash = digest(nonce)
+    if (mission.actions.some(item => item.actionId !== action.actionId && item.authorityException?.nonceHash === nonceHash)) {
+      throw new ConciergeError('AUTHORITY_NONCE_REUSED', 'Exception nonce has already been used in this mission.', 409)
+    }
+    const exceptionId = `pe_${digest({
+      decisionId,
+      actionId: action.actionId,
+      approvedMaximumUsdt,
+      nonceHash,
+      expiresAt,
+    }).slice(0, 32)}`
+    return {
+      exceptionId,
+      decisionId,
+      nonceHash,
+      approvedMaximumUsdt,
+      approvedAt,
+      expiresAt,
+      consumedAt: null,
+    }
   }
 
   private verifyBillsStatusUrl(value: string) {

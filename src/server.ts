@@ -42,6 +42,10 @@ const server = createServer(async (req, res) => {
     const method = req.method || 'GET'
     const url = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`)
     if (method === 'GET' && url.pathname === '/health') return json(res, 200, { ok: true, service: 'pocket-concierge' })
+    const receiptMatch = url.pathname.match(/^\/v1\/authority\/receipts\/(pr_[a-f0-9]{32})$/)
+    if (method === 'GET' && receiptMatch?.[1]) {
+      return json(res, 200, { ok: true, receipt: await service.getReceipt(receiptMatch[1]) })
+    }
     if (method === 'GET' && url.pathname === '/v1/contract') {
       return json(res, 200, {
         ok: true,
@@ -49,6 +53,12 @@ const server = createServer(async (req, res) => {
         role: 'buyer-agent-orchestrator',
         supportedActions: ['okx_bill'],
         lifecycle: ['planned', 'approved', 'executing', 'delivered', 'needs_review'],
+        authority: {
+          policyVersion: '1',
+          outcomes: ['APPROVE', 'ESCALATE', 'BLOCK'],
+          escalation: 'Exact amount, action, decision, nonce, and expiry; consumed once when execution starts.',
+          receipts: '/v1/authority/receipts/{receiptId}',
+        },
         paymentCustody: false,
         privacy: {
           accepts: ['opaque privateInputRef', 'provider service identifiers', 'maximum USDT'],
@@ -74,11 +84,7 @@ const server = createServer(async (req, res) => {
       const actionId = decodeURIComponent(actionMatch[2])
       const requestBody = await body(req)
       if (actionMatch[3] === 'approve') {
-        const input = requestBody && typeof requestBody === 'object' && !Array.isArray(requestBody)
-          ? requestBody as Record<string, unknown>
-          : {}
-        const manifestId = String(input.manifestId ?? '')
-        return json(res, 200, { ok: true, mission: await service.approve(ownerId, externalId, actionId, manifestId) })
+        return json(res, 200, { ok: true, mission: await service.approve(ownerId, externalId, actionId, requestBody) })
       }
       if (actionMatch[3] === 'start') return json(res, 200, { ok: true, execution: await service.start(ownerId, externalId, actionId) })
       return json(res, 200, { ok: true, mission: await service.verify(ownerId, externalId, actionId, requestBody) })

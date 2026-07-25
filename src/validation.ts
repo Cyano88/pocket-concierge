@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { ConciergeError } from './errors.js'
-import type { BillActionInput, BillCategory, MissionInput } from './types.js'
+import type { BillActionInput, BillCategory, MandateInput, MissionInput } from './types.js'
 
 const SAFE_ID = /^[a-zA-Z0-9:_-]{8,128}$/
 const SAFE_REF = /^[a-zA-Z0-9:_-]{3,80}$/
@@ -13,7 +13,20 @@ export function clean(value: unknown, max = 200) {
 }
 
 export function digest(value: unknown) {
-  return createHash('sha256').update(JSON.stringify(value)).digest('hex')
+  return createHash('sha256').update(canonicalJson(value)).digest('hex')
+}
+
+export function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== 'object') return JSON.stringify(value)
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`
+  const input = value as Record<string, unknown>
+  return `{${Object.keys(input).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(input[key])}`).join(',')}}`
+}
+
+export function parseUsdtAtomic(value: string) {
+  if (!DECIMAL.test(value)) throw new ConciergeError('AMOUNT_INVALID', 'USDT amount must have at most 6 decimals.')
+  const [whole, fraction = ''] = value.split('.')
+  return (BigInt(whole!) * 1_000_000n) + BigInt(fraction.padEnd(6, '0'))
 }
 
 function record(value: unknown): Record<string, unknown> {
@@ -30,6 +43,75 @@ function parseDueAt(value: unknown) {
     throw new ConciergeError('DUE_AT_INVALID', 'Every action requires a valid ISO dueAt timestamp.')
   }
   return new Date(parsed).toISOString()
+}
+
+function parseTimestamp(value: unknown, code: string, message: string) {
+  const timestamp = clean(value, 40)
+  const parsed = Date.parse(timestamp)
+  if (!timestamp || !Number.isFinite(parsed)) throw new ConciergeError(code, message)
+  return new Date(parsed).toISOString()
+}
+
+function uniqueSafeList(value: unknown, name: string, allowed?: Set<string>) {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 20) {
+    throw new ConciergeError('MANDATE_INVALID', `${name} must contain 1-20 values.`)
+  }
+  const values = value.map(item => clean(item, 80))
+  if (values.some(item => !SAFE_REF.test(item) || (allowed && !allowed.has(item)))) {
+    throw new ConciergeError('MANDATE_INVALID', `${name} contains an unsupported value.`)
+  }
+  if (new Set(values).size !== values.length) {
+    throw new ConciergeError('MANDATE_INVALID', `${name} must not contain duplicates.`)
+  }
+  return values
+}
+
+function positiveAmount(value: unknown, name: string) {
+  const amount = clean(value, 32)
+  if (!DECIMAL.test(amount) || parseUsdtAtomic(amount) <= 0n) {
+    throw new ConciergeError('MANDATE_INVALID', `${name} must be a positive USDT amount with at most 6 decimals.`)
+  }
+  return amount
+}
+
+function parseMandate(value: unknown): MandateInput {
+  const mandate = record(value)
+  if (clean(mandate.policyVersion, 10) !== '1') {
+    throw new ConciergeError('MANDATE_INVALID', 'mandate.policyVersion must be "1".')
+  }
+  const validFrom = parseTimestamp(mandate.validFrom, 'MANDATE_INVALID', 'mandate.validFrom must be a valid timestamp.')
+  const expiresAt = parseTimestamp(mandate.expiresAt, 'MANDATE_INVALID', 'mandate.expiresAt must be a valid timestamp.')
+  if (Date.parse(expiresAt) <= Date.parse(validFrom)) {
+    throw new ConciergeError('MANDATE_INVALID', 'mandate.expiresAt must be later than validFrom.')
+  }
+  const allowedCategories = uniqueSafeList(mandate.allowedCategories, 'allowedCategories', CATEGORIES) as BillCategory[]
+  const allowedServiceIds = uniqueSafeList(mandate.allowedServiceIds, 'allowedServiceIds')
+  const allowedPrivateInputRefs = uniqueSafeList(mandate.allowedPrivateInputRefs, 'allowedPrivateInputRefs')
+  if (allowedPrivateInputRefs.some(item => !OPAQUE_REF.test(item))) {
+    throw new ConciergeError('MANDATE_INVALID', 'allowedPrivateInputRefs must contain opaque references, never customer identifiers.')
+  }
+  const maximumPerActionUsdt = positiveAmount(mandate.maximumPerActionUsdt, 'maximumPerActionUsdt')
+  const maximumMissionUsdt = positiveAmount(mandate.maximumMissionUsdt, 'maximumMissionUsdt')
+  const approvalThresholdUsdt = positiveAmount(mandate.approvalThresholdUsdt, 'approvalThresholdUsdt')
+  if (parseUsdtAtomic(approvalThresholdUsdt) > parseUsdtAtomic(maximumPerActionUsdt)) {
+    throw new ConciergeError('MANDATE_INVALID', 'approvalThresholdUsdt cannot exceed maximumPerActionUsdt.')
+  }
+  const maximumActions = Number(mandate.maximumActions)
+  if (!Number.isSafeInteger(maximumActions) || maximumActions < 1 || maximumActions > 10) {
+    throw new ConciergeError('MANDATE_INVALID', 'maximumActions must be an integer from 1 to 10.')
+  }
+  return {
+    policyVersion: '1',
+    validFrom,
+    expiresAt,
+    allowedCategories,
+    allowedServiceIds,
+    allowedPrivateInputRefs,
+    maximumPerActionUsdt,
+    maximumMissionUsdt,
+    approvalThresholdUsdt,
+    maximumActions,
+  }
 }
 
 function parseAction(value: unknown): BillActionInput {
@@ -52,7 +134,7 @@ function parseAction(value: unknown): BillActionInput {
   if (!OPAQUE_REF.test(privateInputRef)) {
     throw new ConciergeError('PRIVATE_INPUT_REF_INVALID', 'Use an opaque privateInputRef; never send a phone, meter, or smartcard number to Concierge.')
   }
-  if (!DECIMAL.test(maximumUsdt) || Number(maximumUsdt) <= 0) {
+  if (!DECIMAL.test(maximumUsdt) || parseUsdtAtomic(maximumUsdt) <= 0n) {
     throw new ConciergeError('MAXIMUM_INVALID', 'maximumUsdt must be a positive amount with at most 6 decimals.')
   }
   return {
@@ -73,6 +155,7 @@ export function parseMission(value: unknown): MissionInput {
   const externalId = clean(input.externalId, 128)
   const title = clean(input.title, 160)
   const timezone = clean(input.timezone || 'UTC', 80)
+  const mandate = parseMandate(input.mandate)
   if (!SAFE_ID.test(externalId)) throw new ConciergeError('EXTERNAL_ID_INVALID', 'externalId must be 8-128 safe characters.')
   if (!title) throw new ConciergeError('MISSION_TITLE_REQUIRED', 'Mission title is required.')
   try {
@@ -87,5 +170,5 @@ export function parseMission(value: unknown): MissionInput {
   if (new Set(actions.map(action => action.reference)).size !== actions.length) {
     throw new ConciergeError('ACTION_REFERENCE_DUPLICATE', 'Action references must be unique inside a mission.')
   }
-  return { externalId, title, timezone, actions }
+  return { externalId, title, timezone, mandate, actions }
 }

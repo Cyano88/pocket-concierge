@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
   title: Pocket Concierge API
-  version: 0.1.0
-  description: Privacy-limited mission orchestration for buyer agents. This baseline supports OKX Pocket Bills actions only.
+  version: 0.2.0
+  description: Deterministic, privacy-limited authority and mission orchestration for OKX Pocket Bills buyer agents.
 servers:
   - url: http://localhost:4310
 security:
@@ -22,6 +22,22 @@ paths:
       responses:
         "200":
           description: Supported actions and trust boundary
+  /v1/authority/receipts/{receiptId}:
+    get:
+      security: []
+      operationId: getAuthorityReceipt
+      parameters:
+        - name: receiptId
+          in: path
+          required: true
+          schema:
+            type: string
+            pattern: "^pr_[a-f0-9]{32}$"
+      responses:
+        "200":
+          description: Public privacy-safe authority and execution receipt with recomputed hash verification
+        "404":
+          description: Receipt not found
   /v1/missions/preview:
     post:
       operationId: previewMission
@@ -75,9 +91,11 @@ paths:
               properties:
                 manifestId:
                   type: string
+                exception:
+                  $ref: "#/components/schemas/AuthorityExceptionInput"
       responses:
         "200":
-          description: Exact manifest approved
+          description: Exact manifest approved; escalations require a one-use exception
         "409":
           description: Manifest mismatch or invalid state
   /v1/missions/{externalId}/actions/{actionId}/start:
@@ -141,7 +159,7 @@ components:
     MissionInput:
       type: object
       additionalProperties: false
-      required: [externalId, title, timezone, actions]
+      required: [externalId, title, timezone, mandate, actions]
       properties:
         externalId:
           type: string
@@ -154,6 +172,8 @@ components:
         timezone:
           type: string
           examples: [Africa/Lagos]
+        mandate:
+          $ref: "#/components/schemas/Mandate"
         actions:
           type: array
           minItems: 1
@@ -189,3 +209,80 @@ components:
           type: string
           pattern: "^(?:0|[1-9][0-9]*)(?:\\.[0-9]{1,6})?$"
           description: Hard buyer-side payment ceiling
+    Mandate:
+      type: object
+      additionalProperties: false
+      required:
+        - policyVersion
+        - validFrom
+        - expiresAt
+        - allowedCategories
+        - allowedServiceIds
+        - allowedPrivateInputRefs
+        - maximumPerActionUsdt
+        - maximumMissionUsdt
+        - approvalThresholdUsdt
+        - maximumActions
+      properties:
+        policyVersion:
+          const: "1"
+        validFrom:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+        allowedCategories:
+          type: array
+          minItems: 1
+          maxItems: 20
+          uniqueItems: true
+          items:
+            type: string
+            enum: [data, electricity, tv]
+        allowedServiceIds:
+          type: array
+          minItems: 1
+          maxItems: 20
+          uniqueItems: true
+          items:
+            type: string
+        allowedPrivateInputRefs:
+          type: array
+          minItems: 1
+          maxItems: 20
+          uniqueItems: true
+          items:
+            type: string
+          description: Opaque local recipient references, never raw customer identifiers
+        maximumPerActionUsdt:
+          type: string
+          pattern: "^(?:0|[1-9][0-9]*)(?:\\.[0-9]{1,6})?$"
+        maximumMissionUsdt:
+          type: string
+          pattern: "^(?:0|[1-9][0-9]*)(?:\\.[0-9]{1,6})?$"
+        approvalThresholdUsdt:
+          type: string
+          pattern: "^(?:0|[1-9][0-9]*)(?:\\.[0-9]{1,6})?$"
+        maximumActions:
+          type: integer
+          minimum: 1
+          maximum: 10
+    AuthorityExceptionInput:
+      type: object
+      additionalProperties: false
+      required: [decisionId, nonce, approvedMaximumUsdt, expiresAt]
+      properties:
+        decisionId:
+          type: string
+        nonce:
+          type: string
+          minLength: 8
+          maxLength: 128
+          writeOnly: true
+        approvedMaximumUsdt:
+          type: string
+          description: Must exactly equal the immutable action maximumUsdt
+        expiresAt:
+          type: string
+          format: date-time

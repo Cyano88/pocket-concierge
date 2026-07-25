@@ -1,8 +1,8 @@
 # Pocket Concierge
 
-Pocket Concierge is a buyer/User Agent orchestrator for household missions.
+Pocket Concierge is a deterministic authority and buyer-agent orchestrator for household missions.
 
-The pre-hackathon baseline supports one action: a user-approved Nigerian bill purchase through Pocket Bills and the OKX Agent Payments Protocol. It plans the action, creates deterministic mission/cycle identifiers, waits for explicit approval, returns a buyer-side execution instruction, and verifies the token-scoped Pocket Bills status response.
+Its first adapter supports a user-approved Nigerian bill purchase through Pocket Bills and the OKX Agent Payments Protocol. Before execution, a versioned mandate checks time, category, service, opaque recipient, action count, per-action spend, total mission spend, and approval threshold. The deterministic result is `APPROVE`, `ESCALATE`, or `BLOCK`; no LLM decides whether payment is allowed.
 
 The hosted Concierge service never:
 
@@ -11,14 +11,16 @@ The hosted Concierge service never:
 - receives a phone, meter, or smartcard number;
 - receives Prava OAuth tokens or card credentials;
 - silently retries an uncertain purchase.
+- lets an exception override a hard category, recipient, expiry, or spending limit.
 
 The Prava merchant-shopping action is deliberately not implemented in this baseline. It will be built as clearly new work during the Agentic Commerce Hackathon.
 
 ## State flow
 
 ```text
-planned -> approved -> executing -> delivered
-                              \-> needs_review
+mandate -> APPROVE -----------------> approved -> executing -> delivered
+        \-> ESCALATE -> exact exception /                 \-> needs_review
+         \-> BLOCK
 ```
 
 ## Local setup
@@ -35,19 +37,21 @@ npm run start
 
 ## Privacy boundary
 
-Mission actions use an opaque `privateInputRef`, such as `home-mobile`. The local buyer agent resolves that reference to a phone, meter, or smartcard number only when calling Pocket Bills. Concierge sees only the opaque reference.
+Mission actions and mandates use an opaque `privateInputRef`, such as `home-mobile`. The local buyer agent resolves that reference to a phone, meter, or smartcard number only when calling Pocket Bills. Concierge sees only the opaque reference.
 
 After payment, the buyer sends the returned Pocket Bills `status.url` and `status.token` to the verification endpoint. Concierge performs one allowlisted status check, saves only sanitized settlement evidence, and does not persist or return the status token.
 
+Terminal verification creates a canonical SHA-256 authority receipt. `GET /v1/authority/receipts/{receiptId}` is public and recomputes the receipt hash on every read. It contains a hash of the opaque private reference—not the reference, customer details, agent key, or status token.
+
 ## Five-minute agent integration
 
-1. Create or preview a mission with `POST /v1/missions`.
-2. Display the immutable `manifestId`, action, due time, and `maximumUsdt` to the user.
-3. Approve that exact manifest with `POST /v1/missions/{externalId}/actions/{actionId}/approve`.
+1. Create or preview a mission with `POST /v1/missions`, including the smallest acceptable mandate.
+2. Inspect the immutable `manifestId` and each action's `authorityDecision`.
+3. If it is `APPROVE`, approve that exact manifest. If it is `ESCALATE`, include an exception bound to the returned `decisionId`, exact `maximumUsdt`, fresh nonce, and short expiry. Stop on `BLOCK`.
 4. Call `start`. The response tells the local buyer agent which Pocket Bills endpoint and public fields to use.
 5. Resolve `privateInputRef` locally, obtain a fresh OKX payment quote, enforce `maximumUsdt`, and ask the user to confirm the exact charge.
 6. Complete the x402 request locally. Send only the returned `status.url` and `status.token` to `verify`.
-7. Treat only a Concierge `delivered` state with a `receiptHash` as success. Escalate `needs_review`; never blindly repay.
+7. Treat only a Concierge `delivered` state with both downstream evidence and an `authorityReceiptId` as success. Escalate `needs_review`; never blindly repay.
 
 Every protected request uses:
 
@@ -57,6 +61,22 @@ Content-Type: application/json
 ```
 
 Use [openapi.yaml](./openapi.yaml) as the machine-readable contract and [examples/mission.json](./examples/mission.json) as a copy-paste request. The baseline boundary is recorded in [docs/PRE_HACKATHON_BASELINE.md](./docs/PRE_HACKATHON_BASELINE.md).
+
+An escalation approval body is deliberately small:
+
+```json
+{
+  "manifestId": "immutable-manifest-hash",
+  "exception": {
+    "decisionId": "pd_...",
+    "nonce": "human-approval-0001",
+    "approvedMaximumUsdt": "0.25",
+    "expiresAt": "2026-07-25T04:10:00.000Z"
+  }
+}
+```
+
+The exception is consumed atomically when `start` first changes the action to `executing`. Replaying `start` returns the same deterministic downstream order; it does not create another authorization.
 
 The local buyer client keeps the household reference out of Concierge and implements three deliberately separate phases:
 
@@ -93,3 +113,17 @@ Never re-run `--confirm-payment` for a state marked `payment_in_progress`, `paid
 Set `POCKET_CONCIERGE_DB_PATH=.data/concierge.sqlite` to enable durable SQLite storage with WAL and optimistic revision checks. Without it, the service intentionally uses an in-memory store for local tests.
 
 For the first public demo, run one service instance with one persistent volume. A horizontally scaled deployment should replace SQLite with a shared transactional database while preserving the `MissionStore` compare-and-update contract.
+
+## Railway deployment
+
+The checked-in [railway.json](./railway.json) uses Railpack, runs one replica, requires a `/data` volume, builds with `npm ci && npm run build`, starts the compiled server, and checks `/health`.
+
+Required service variables:
+
+```text
+POCKET_CONCIERGE_AGENT_KEYS=<owner-id>:<long-random-agent-secret>
+POCKET_CONCIERGE_DB_PATH=/data/concierge.sqlite
+RAILPACK_NODE_VERSION=24.18.0
+```
+
+The agent secret must be generated in Railway or another secret manager. Never commit it or the local binding key.

@@ -2,16 +2,18 @@ import { mkdirSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { ConciergeError } from './errors.js'
-import type { Mission } from './types.js'
+import type { AuthorityReceipt, Mission } from './types.js'
 
 export interface MissionStore {
   get(ownerId: string, externalId: string): Promise<Mission | null>
+  getReceipt(receiptId: string): Promise<AuthorityReceipt | null>
   putIfAbsent(mission: Mission): Promise<{ mission: Mission; inserted: boolean }>
-  update(mission: Mission, expectedRevision: number): Promise<void>
+  update(mission: Mission, expectedRevision: number, receipt?: AuthorityReceipt): Promise<void>
 }
 
 export class MemoryMissionStore implements MissionStore {
   private readonly missions = new Map<string, Mission>()
+  private readonly receipts = new Map<string, AuthorityReceipt>()
 
   private key(ownerId: string, externalId: string) {
     return `${ownerId}:${externalId}`
@@ -19,6 +21,10 @@ export class MemoryMissionStore implements MissionStore {
 
   async get(ownerId: string, externalId: string) {
     return structuredClone(this.missions.get(this.key(ownerId, externalId)) ?? null)
+  }
+
+  async getReceipt(receiptId: string) {
+    return structuredClone(this.receipts.get(receiptId) ?? null)
   }
 
   async putIfAbsent(mission: Mission) {
@@ -29,12 +35,13 @@ export class MemoryMissionStore implements MissionStore {
     return { mission: structuredClone(mission), inserted: true }
   }
 
-  async update(mission: Mission, expectedRevision: number) {
+  async update(mission: Mission, expectedRevision: number, receipt?: AuthorityReceipt) {
     const current = this.missions.get(this.key(mission.ownerId, mission.externalId))
     if (!current || current.revision !== expectedRevision || mission.revision !== expectedRevision + 1) {
       throw new ConciergeError('MISSION_WRITE_CONFLICT', 'Mission changed concurrently; reload it before retrying.', 409)
     }
     this.missions.set(this.key(mission.ownerId, mission.externalId), structuredClone(mission))
+    if (receipt) this.receipts.set(receipt.receiptId, structuredClone(receipt))
   }
 }
 
@@ -58,6 +65,10 @@ export class SqliteMissionStore implements MissionStore {
         document TEXT NOT NULL,
         PRIMARY KEY (owner_id, external_id)
       );
+      CREATE TABLE IF NOT EXISTS authority_receipts (
+        receipt_id TEXT PRIMARY KEY,
+        document TEXT NOT NULL
+      );
     `)
   }
 
@@ -66,6 +77,13 @@ export class SqliteMissionStore implements MissionStore {
       'SELECT document FROM missions WHERE owner_id = ? AND external_id = ?',
     ).get(ownerId, externalId) as MissionRow | undefined
     return row ? JSON.parse(row.document) as Mission : null
+  }
+
+  async getReceipt(receiptId: string) {
+    const row = this.database.prepare(
+      'SELECT document FROM authority_receipts WHERE receipt_id = ?',
+    ).get(receiptId) as MissionRow | undefined
+    return row ? JSON.parse(row.document) as AuthorityReceipt : null
   }
 
   async putIfAbsent(mission: Mission) {
@@ -79,23 +97,37 @@ export class SqliteMissionStore implements MissionStore {
     return { mission: existing, inserted: false }
   }
 
-  async update(mission: Mission, expectedRevision: number) {
+  async update(mission: Mission, expectedRevision: number, receipt?: AuthorityReceipt) {
     if (mission.revision !== expectedRevision + 1) {
       throw new ConciergeError('MISSION_WRITE_CONFLICT', 'Mission revision is invalid.', 409)
     }
-    const result = this.database.prepare(`
-      UPDATE missions
-      SET revision = ?, document = ?
-      WHERE owner_id = ? AND external_id = ? AND revision = ?
-    `).run(
-      mission.revision,
-      JSON.stringify(mission),
-      mission.ownerId,
-      mission.externalId,
-      expectedRevision,
-    )
-    if (result.changes !== 1) {
-      throw new ConciergeError('MISSION_WRITE_CONFLICT', 'Mission changed concurrently; reload it before retrying.', 409)
+    this.database.exec('BEGIN IMMEDIATE')
+    try {
+      const result = this.database.prepare(`
+        UPDATE missions
+        SET revision = ?, document = ?
+        WHERE owner_id = ? AND external_id = ? AND revision = ?
+      `).run(
+        mission.revision,
+        JSON.stringify(mission),
+        mission.ownerId,
+        mission.externalId,
+        expectedRevision,
+      )
+      if (result.changes !== 1) {
+        throw new ConciergeError('MISSION_WRITE_CONFLICT', 'Mission changed concurrently; reload it before retrying.', 409)
+      }
+      if (receipt) {
+        this.database.prepare(`
+          INSERT INTO authority_receipts (receipt_id, document)
+          VALUES (?, ?)
+          ON CONFLICT(receipt_id) DO UPDATE SET document = excluded.document
+        `).run(receipt.receiptId, JSON.stringify(receipt))
+      }
+      this.database.exec('COMMIT')
+    } catch (error) {
+      this.database.exec('ROLLBACK')
+      throw error
     }
   }
 
