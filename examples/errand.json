@@ -1,0 +1,19 @@
+{
+  "externalId": "managerx-gig-123",
+  "cycleId": "cycle-2026-07-25",
+  "title": "Renew Mum's MTN data",
+  "timezone": "Africa/Lagos",
+  "dueAt": "2026-07-25T09:30:00.000Z",
+  "errand": {
+    "category": "data",
+    "serviceId": "mtn-data",
+    "variationCode": "mtn-10mb-100",
+    "privateInputRef": "family-mum-mobile",
+    "maximumUsdt": "0.25"
+  },
+  "mandate": {
+    "validFrom": "2026-07-25T09:00:00.000Z",
+    "expiresAt": "2026-07-25T11:00:00.000Z",
+    "approvalThresholdUsdt": "0.25"
+  }
+}

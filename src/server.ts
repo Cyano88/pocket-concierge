@@ -1,10 +1,17 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
 import { authenticate, parseAgentKeys } from './auth.js'
+import {
+  evaluatePaidAuthorityCheck,
+  OKX_AUTHORITY_CHECK_FEE_ATOMIC,
+  OKX_AUTHORITY_CHECK_OUTPUT_SCHEMA,
+  OKX_AUTHORITY_CHECK_ROUTE,
+} from './authority-check.js'
+import { errandToMissionInput, errandView } from './errands.js'
 import { ConciergeError } from './errors.js'
 import { buildOkxAuthorityProof, OKX_AUTHORITY_PROOF_ROUTE } from './okx-proof.js'
 import { ConciergeService, fetchJson } from './service.js'
 import { MemoryMissionStore, SqliteMissionStore } from './store.js'
-import { OkxAuthorityProofProtector } from './x402-proof.js'
+import { OkxAuthorityProofProtector, OkxPaidRouteProtector } from './x402-proof.js'
 
 const PORT = Number(process.env.PORT || 4310)
 const keys = parseAgentKeys(process.env.POCKET_CONCIERGE_AGENT_KEYS)
@@ -16,18 +23,30 @@ const publicUrl = String(
 const proofReceiptId = String(process.env.POCKET_CONCIERGE_DEMO_RECEIPT_ID || '').trim()
 const proofTransaction = String(process.env.POCKET_CONCIERGE_DEMO_TX_HASH || '').trim()
 const proofPayTo = String(process.env.POCKET_CONCIERGE_OKX_PAY_TO || '').trim()
-const proofProtector = (
+const paidRouteConfig = (
   process.env.OKX_API_KEY
   && process.env.OKX_SECRET_KEY
   && process.env.OKX_PASSPHRASE
   && proofPayTo
 )
-  ? new OkxAuthorityProofProtector({
+  ? {
       apiKey: process.env.OKX_API_KEY,
       secretKey: process.env.OKX_SECRET_KEY,
       passphrase: process.env.OKX_PASSPHRASE,
       payTo: proofPayTo,
       publicUrl,
+    }
+  : null
+const proofProtector = paidRouteConfig ? new OkxAuthorityProofProtector(paidRouteConfig) : null
+const authorityCheckProtector = paidRouteConfig
+  ? new OkxPaidRouteProtector(paidRouteConfig, {
+      method: 'POST',
+      path: OKX_AUTHORITY_CHECK_ROUTE,
+      amountAtomic: OKX_AUTHORITY_CHECK_FEE_ATOMIC,
+      description: 'Deterministic APPROVE, ESCALATE, or BLOCK decision for one privacy-safe proposed purchase.',
+      serviceName: 'Purchase Authority Check',
+      tags: ['authority', 'spending', 'commerce', 'policy', 'xlayer'],
+      outputSchema: OKX_AUTHORITY_CHECK_OUTPUT_SCHEMA,
     })
   : null
 const service = new ConciergeService({
@@ -94,6 +113,18 @@ const server = createServer(async (req, res) => {
       if (!receipt) throw new ConciergeError('OKX_PROOF_NOT_FOUND', 'The verified authority receipt is unavailable.', 503)
       return json(res, 200, buildOkxAuthorityProof(receipt, proofTransaction, publicUrl), payment.headers)
     }
+    if (method === 'POST' && url.pathname === OKX_AUTHORITY_CHECK_ROUTE) {
+      if (!authorityCheckProtector) {
+        throw new ConciergeError('OKX_AUTHORITY_CHECK_NOT_CONFIGURED', 'The paid authority check is not configured.', 503)
+      }
+      const requestBody = await body(req)
+      const payment = await authorityCheckProtector.protect(new Request(`${publicUrl}${url.pathname}${url.search}`, {
+        method: 'POST',
+        headers: fetchHeaders(req),
+      }), requestBody)
+      if (payment.status === 'challenge') return sendResponse(res, payment.response)
+      return json(res, 200, evaluatePaidAuthorityCheck(requestBody, Date.now()), payment.headers)
+    }
     const receiptMatch = url.pathname.match(/^\/v1\/authority\/receipts\/(pr_[a-f0-9]{32})$/)
     if (method === 'GET' && receiptMatch?.[1]) {
       return json(res, 200, { ok: true, receipt: await service.getReceipt(receiptMatch[1]) })
@@ -111,6 +142,7 @@ const server = createServer(async (req, res) => {
           escalation: 'Exact amount, action, decision, nonce, and expiry; consumed once when execution starts.',
           receipts: '/v1/authority/receipts/{receiptId}',
           marketplaceProof: OKX_AUTHORITY_PROOF_ROUTE,
+          reusableAuthorityCheck: OKX_AUTHORITY_CHECK_ROUTE,
         },
         paymentCustody: false,
         privacy: {
@@ -123,8 +155,59 @@ const server = createServer(async (req, res) => {
         },
       })
     }
+    if (method === 'GET' && url.pathname === '/v1/capabilities') {
+      return json(res, 200, {
+        ok: true,
+        service: 'Pocket Concierge',
+        entrypoint: 'POST /v1/errands',
+        authorityCheck: OKX_AUTHORITY_CHECK_ROUTE,
+        supportedExecution: {
+          provider: 'Pocket Bills',
+          categories: ['data', 'electricity', 'tv'],
+          verifiedPilot: { category: 'data', serviceId: 'mtn-data' },
+        },
+        unavailableUntilAdapterVerification: ['airtime', 'paid_brief', 'shopping'],
+        idempotency: 'externalId + cycleId',
+        privacy: 'Send only opaque privateInputRef values; the buyer executor keeps customer references locally.',
+      })
+    }
     if (!keys.size) throw new ConciergeError('SERVICE_NOT_CONFIGURED', 'Pocket Concierge agent keys are not configured.', 503)
     const ownerId = authenticate(req.headers.authorization, keys)
+    if (method === 'POST' && url.pathname === '/v1/errands') {
+      const created = await service.create(ownerId, errandToMissionInput(await body(req)))
+      return json(res, created.replayed ? 200 : 201, {
+        ok: true,
+        replayed: created.replayed,
+        errand: errandView(created.mission),
+      })
+    }
+    const errandMatch = url.pathname.match(/^\/v1\/errands\/([^/]+)$/)
+    if (method === 'GET' && errandMatch?.[1]) {
+      const mission = await service.get(ownerId, decodeURIComponent(errandMatch[1]))
+      return json(res, 200, { ok: true, errand: errandView(mission) })
+    }
+    const errandActionMatch = url.pathname.match(/^\/v1\/errands\/([^/]+)\/(authorize|complete)$/)
+    if (method === 'POST' && errandActionMatch?.[1] && errandActionMatch[2]) {
+      const errandId = decodeURIComponent(errandActionMatch[1])
+      const requestBody = await body(req)
+      const current = await service.get(ownerId, errandId)
+      const action = current.actions[0]
+      if (!action) throw new ConciergeError('ERRAND_INVALID', 'Errand has no action.', 500)
+      if (errandActionMatch[2] === 'authorize') {
+        if (action.state === 'planned' || action.state === 'approved') {
+          await service.approve(ownerId, errandId, action.actionId, requestBody)
+        }
+        const execution = await service.start(ownerId, errandId, action.actionId)
+        const updated = await service.get(ownerId, errandId)
+        return json(res, 200, { ok: true, errand: errandView(updated, execution) })
+      }
+      const updated = await service.verify(ownerId, errandId, action.actionId, requestBody)
+      const updatedAction = updated.actions[0]
+      const receipt = updatedAction?.authorityReceiptId
+        ? await service.getReceipt(updatedAction.authorityReceiptId)
+        : undefined
+      return json(res, 200, { ok: true, errand: errandView(updated, undefined, receipt) })
+    }
     if (method === 'POST' && url.pathname === '/v1/missions/preview') return json(res, 200, { ok: true, mission: service.preview(ownerId, await body(req)) })
     if (method === 'POST' && url.pathname === '/v1/missions') return json(res, 201, { ok: true, ...(await service.create(ownerId, await body(req))) })
 

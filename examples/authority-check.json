@@ -1,0 +1,19 @@
+{
+  "externalId": "jobber-purchase-123",
+  "cycleId": "2026-07-25",
+  "action": {
+    "category": "airtime",
+    "serviceId": "mtn-airtime",
+    "privateInputRef": "family-mum-phone",
+    "amountUsdt": "0.20"
+  },
+  "mandate": {
+    "validFrom": "2026-07-25T09:00:00.000Z",
+    "expiresAt": "2026-07-25T11:00:00.000Z",
+    "allowedCategories": ["airtime"],
+    "allowedServiceIds": ["mtn-airtime"],
+    "allowedPrivateInputRefs": ["family-mum-phone"],
+    "maximumPerActionUsdt": "0.25",
+    "approvalThresholdUsdt": "0.25"
+  }
+}

@@ -32,6 +32,16 @@ type ProofPaymentConfig = {
   publicUrl: string
 }
 
+export type PaidRouteConfig = {
+  method: 'GET' | 'POST'
+  path: string
+  amountAtomic: string
+  description: string
+  serviceName: string
+  tags: string[]
+  outputSchema: Readonly<Record<string, unknown>>
+}
+
 type X402Server = Pick<x402HTTPResourceServer, 'processHTTPRequest' | 'processSettlement'>
 
 function normalizeSupportedResponse(value: unknown) {
@@ -57,11 +67,22 @@ function sdkResponse(response: { status: number; headers: Record<string, string>
   return new Response(body, { status: response.status, headers })
 }
 
-export class OkxAuthorityProofProtector {
+const PROOF_ROUTE: PaidRouteConfig = {
+  method: 'GET',
+  path: OKX_AUTHORITY_PROOF_ROUTE,
+  amountAtomic: OKX_AUTHORITY_PROOF_FEE_ATOMIC,
+  description: 'Verified Pocket Concierge authority decision, settlement evidence, and integration contract.',
+  serviceName: 'Governed Purchase Proof',
+  tags: ['authority', 'commerce', 'household', 'xlayer', 'proof'],
+  outputSchema: OKX_AUTHORITY_PROOF_OUTPUT_SCHEMA,
+}
+
+export class OkxPaidRouteProtector {
   private serverPromise: Promise<X402Server> | undefined
 
   constructor(
     private readonly config: ProofPaymentConfig,
+    private readonly route: PaidRouteConfig,
     private readonly facilitatorFactory: () => OKXFacilitatorClient = () => new OKXFacilitatorClient({
       apiKey: config.apiKey,
       secretKey: config.secretKey,
@@ -70,9 +91,9 @@ export class OkxAuthorityProofProtector {
     }),
   ) {}
 
-  async protect(request: Request): Promise<ProofPaymentResult> {
+  async protect(request: Request, requestBody?: unknown): Promise<ProofPaymentResult> {
     const server = await this.httpServer()
-    const context = this.context(request)
+    const context = this.context(request, requestBody)
     const payment = await server.processHTTPRequest(context)
     if (payment.type === 'payment-error') {
       return { status: 'challenge', response: sdkResponse(payment.response) }
@@ -90,28 +111,28 @@ export class OkxAuthorityProofProtector {
     if (
       payment.paymentRequirements.network !== NETWORK
       || payment.paymentRequirements.asset.toLowerCase() !== XLAYER_USDT0
-      || payment.paymentRequirements.amount !== OKX_AUTHORITY_PROOF_FEE_ATOMIC
-      || (settled.amount && settled.amount !== OKX_AUTHORITY_PROOF_FEE_ATOMIC)
+      || payment.paymentRequirements.amount !== this.route.amountAtomic
+      || (settled.amount && settled.amount !== this.route.amountAtomic)
     ) {
       throw new ConciergeError('OKX_PAYMENT_MISMATCH', 'The signed replay does not match the proof listing.', 409)
     }
     return { status: 'paid', headers: new Headers(settled.headers) }
   }
 
-  private context(request: Request): HTTPRequestContext {
+  private context(request: Request, requestBody?: unknown): HTTPRequestContext {
     const url = new URL(request.url)
     const adapter: HTTPAdapter = {
       getHeader: name => request.headers.get(name) ?? undefined,
-      getMethod: () => 'GET',
+      getMethod: () => this.route.method,
       getPath: () => url.pathname,
       getUrl: () => url.toString(),
       getAcceptHeader: () => request.headers.get('accept') ?? '',
       getUserAgent: () => request.headers.get('user-agent') ?? '',
       getQueryParams: () => Object.fromEntries(url.searchParams.entries()),
       getQueryParam: name => url.searchParams.get(name) ?? undefined,
-      getBody: () => undefined,
+      getBody: () => requestBody,
     }
-    return { adapter, path: OKX_AUTHORITY_PROOF_ROUTE, method: 'GET' }
+    return { adapter, path: this.route.path, method: this.route.method }
   }
 
   private httpServer() {
@@ -141,27 +162,36 @@ export class OkxAuthorityProofProtector {
         network: NETWORK,
         payTo: this.config.payTo,
         price: {
-          amount: OKX_AUTHORITY_PROOF_FEE_ATOMIC,
+          amount: this.route.amountAtomic,
           asset: XLAYER_USDT0,
           extra: { tokenSymbol: 'USDT', decimals: 6, name: 'USD₮0', version: '1' },
         },
         maxTimeoutSeconds: 300,
         extra: { tokenSymbol: 'USDT', decimals: 6, name: 'USD₮0', version: '1' },
       },
-      resource: `${this.config.publicUrl}${OKX_AUTHORITY_PROOF_ROUTE}`,
-      description: 'Verified Pocket Concierge authority decision, settlement evidence, and integration contract.',
+      resource: `${this.config.publicUrl}${this.route.path}`,
+      description: this.route.description,
       mimeType: 'application/json',
       extensions: {
-        serviceName: 'Governed Purchase Proof',
-        tags: ['authority', 'commerce', 'household', 'xlayer', 'proof'],
-        outputSchema: OKX_AUTHORITY_PROOF_OUTPUT_SCHEMA,
+        serviceName: this.route.serviceName,
+        tags: this.route.tags,
+        outputSchema: this.route.outputSchema,
       },
     } as const
     const routes: RoutesConfig = {
-      [`GET ${OKX_AUTHORITY_PROOF_ROUTE}`]: route,
+      [`${this.route.method} ${this.route.path}`]: route,
     }
     const server = new x402HTTPResourceServer(resourceServer, routes)
     await server.initialize()
     return server
+  }
+}
+
+export class OkxAuthorityProofProtector extends OkxPaidRouteProtector {
+  constructor(
+    config: ProofPaymentConfig,
+    facilitatorFactory?: () => OKXFacilitatorClient,
+  ) {
+    super(config, PROOF_ROUTE, facilitatorFactory)
   }
 }

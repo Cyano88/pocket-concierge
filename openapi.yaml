@@ -1,13 +1,33 @@
 openapi: 3.1.0
 info:
   title: Pocket Concierge API
-  version: 0.2.0
-  description: Deterministic, privacy-limited authority and mission orchestration for OKX Pocket Bills buyer agents.
+  version: 0.3.0
+  description: Simple household errands backed by deterministic authority, noncustodial buyer execution, and verifiable receipts.
 servers:
   - url: http://localhost:4310
 security:
   - bearerAuth: []
 paths:
+  /v1/okx/authority-check:
+    post:
+      security: []
+      operationId: checkPurchaseAuthority
+      summary: Get a reusable deterministic spending decision after the required 0.01-USDT replay
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AuthorityCheckInput"
+      responses:
+        "200":
+          description: APPROVE, ESCALATE, or BLOCK with a recomputable decision hash
+        "402":
+          description: 0.01-USDT exact EIP-3009 payment challenge on X Layer
+          headers:
+            PAYMENT-REQUIRED:
+              required: true
+              schema: { type: string }
   /v1/okx/authority-proof:
     get:
       operationId: getOkxAuthorityProof
@@ -26,6 +46,81 @@ paths:
             PAYMENT-REQUIRED:
               required: true
               schema: { type: string }
+  /v1/capabilities:
+    get:
+      security: []
+      operationId: getCapabilities
+      responses:
+        "200":
+          description: Verified, supported, and unavailable errand adapters
+  /v1/errands:
+    post:
+      operationId: createErrand
+      summary: Create one idempotent household errand cycle
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ErrandInput"
+      responses:
+        "201":
+          description: Errand created with an authority decision and one next action
+        "200":
+          description: Idempotent replay of the exact same errand cycle
+        "409":
+          description: externalId and cycleId already belong to a different immutable errand
+  /v1/errands/{errandId}:
+    get:
+      operationId: getErrand
+      parameters:
+        - $ref: "#/components/parameters/ErrandId"
+      responses:
+        "200":
+          description: Current state, decision, and one next action
+        "404":
+          description: Errand not found
+  /v1/errands/{errandId}/authorize:
+    post:
+      operationId: authorizeErrand
+      parameters:
+        - $ref: "#/components/parameters/ErrandId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [manifestId]
+              properties:
+                manifestId: { type: string }
+                exception:
+                  $ref: "#/components/schemas/AuthorityExceptionInput"
+      responses:
+        "200":
+          description: Pocket Bills payment instruction after exact manifest authorization
+        "409":
+          description: Blocked, expired, mismatched, or missing approval
+  /v1/errands/{errandId}/complete:
+    post:
+      operationId: completeErrand
+      parameters:
+        - $ref: "#/components/parameters/ErrandId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [statusUrl, statusToken]
+              properties:
+                statusUrl: { type: string, format: uri }
+                statusToken: { type: string, writeOnly: true }
+      responses:
+        "200":
+          description: Verified delivery or needs-review state with privacy-safe authority receipt
   /health:
     get:
       security: []
@@ -161,6 +256,12 @@ components:
       type: http
       scheme: bearer
   parameters:
+    ErrandId:
+      name: errandId
+      in: path
+      required: true
+      schema:
+        type: string
     ExternalId:
       name: externalId
       in: path
@@ -174,6 +275,88 @@ components:
       schema:
         type: string
   schemas:
+    AuthorityCheckInput:
+      type: object
+      additionalProperties: false
+      required: [externalId, cycleId, action, mandate]
+      properties:
+        externalId: { type: string }
+        cycleId: { type: string }
+        action:
+          type: object
+          additionalProperties: false
+          required: [category, serviceId, privateInputRef, amountUsdt]
+          properties:
+            category: { type: string }
+            serviceId: { type: string }
+            privateInputRef:
+              type: string
+              description: Opaque local reference, never a customer identifier
+            amountUsdt: { type: string }
+        mandate:
+          type: object
+          additionalProperties: false
+          required:
+            - validFrom
+            - expiresAt
+            - allowedCategories
+            - allowedServiceIds
+            - allowedPrivateInputRefs
+            - maximumPerActionUsdt
+            - approvalThresholdUsdt
+          properties:
+            validFrom: { type: string, format: date-time }
+            expiresAt: { type: string, format: date-time }
+            allowedCategories:
+              type: array
+              items: { type: string }
+            allowedServiceIds:
+              type: array
+              items: { type: string }
+            allowedPrivateInputRefs:
+              type: array
+              items: { type: string }
+            maximumPerActionUsdt: { type: string }
+            approvalThresholdUsdt: { type: string }
+    ErrandInput:
+      type: object
+      additionalProperties: false
+      required: [externalId, cycleId, dueAt, errand, mandate]
+      properties:
+        externalId:
+          type: string
+          description: Stable caller or platform job identifier
+        cycleId:
+          type: string
+          description: Stable one-off, weekly, or monthly cycle identifier
+        title: { type: string }
+        timezone: { type: string, default: UTC }
+        dueAt: { type: string, format: date-time }
+        errand:
+          type: object
+          additionalProperties: false
+          required: [category, serviceId, variationCode, privateInputRef, maximumUsdt]
+          properties:
+            category:
+              type: string
+              enum: [data, electricity, tv]
+            serviceId: { type: string }
+            variationCode: { type: string }
+            privateInputRef:
+              type: string
+              description: Opaque key into the buyer agent's local vault
+            maximumUsdt: { type: string }
+            description: { type: string }
+        mandate:
+          type: object
+          additionalProperties: false
+          required: [validFrom, expiresAt]
+          properties:
+            validFrom: { type: string, format: date-time }
+            expiresAt: { type: string, format: date-time }
+            maximumPerActionUsdt: { type: string }
+            maximumCycleUsdt: { type: string }
+            approvalThresholdUsdt: { type: string }
     MissionInput:
       type: object
       additionalProperties: false

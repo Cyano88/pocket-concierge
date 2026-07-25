@@ -10,7 +10,13 @@ import type { AuthorityReceipt } from '../src/types.js'
 import {
   OKX_AUTHORITY_PROOF_OUTPUT_SCHEMA,
   OkxAuthorityProofProtector,
+  OkxPaidRouteProtector,
 } from '../src/x402-proof.js'
+import {
+  OKX_AUTHORITY_CHECK_FEE_ATOMIC,
+  OKX_AUTHORITY_CHECK_OUTPUT_SCHEMA,
+  OKX_AUTHORITY_CHECK_ROUTE,
+} from '../src/authority-check.js'
 import { digest } from '../src/validation.js'
 
 const payTo = '0x988263a851afe17f8a827eda81269f9fb7553cbc'
@@ -112,6 +118,37 @@ test('authority proof endpoint advertises the required 0.01-USDT EIP-3009 accept
     headers: { 'payment-signature': signature },
   }))
   assert.equal(paid.status, 'paid')
+})
+
+test('reusable POST authority check advertises the same exact paid contract', async () => {
+  const protector = new OkxPaidRouteProtector({
+    apiKey: 'api-key',
+    secretKey: 'secret-key',
+    passphrase: 'passphrase',
+    payTo,
+    publicUrl: 'https://concierge.example.com',
+  }, {
+    method: 'POST',
+    path: OKX_AUTHORITY_CHECK_ROUTE,
+    amountAtomic: OKX_AUTHORITY_CHECK_FEE_ATOMIC,
+    description: 'Purchase authority decision.',
+    serviceName: 'Purchase Authority Check',
+    tags: ['authority'],
+    outputSchema: OKX_AUTHORITY_CHECK_OUTPUT_SCHEMA,
+  }, () => fakeFacilitator() as never)
+  const requestBody = { externalId: 'agent-purchase-123' }
+  const challenged = await protector.protect(new Request(
+    `https://concierge.example.com${OKX_AUTHORITY_CHECK_ROUTE}`,
+    { method: 'POST' },
+  ), requestBody)
+  assert.equal(challenged.status, 'challenge')
+  if (challenged.status !== 'challenge') return
+  const encoded = challenged.response.headers.get('payment-required')
+  assert.ok(encoded)
+  const challenge = decodePaymentRequiredHeader(encoded)
+  assert.equal(challenge.accepts[0]?.amount, '10000')
+  assert.equal(challenge.accepts[0]?.scheme, 'exact')
+  assert.equal(challenge.resource?.url, `https://concierge.example.com${OKX_AUTHORITY_CHECK_ROUTE}`)
 })
 
 test('paid replay proof is recomputable and privacy-limited', () => {
