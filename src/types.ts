@@ -41,6 +41,7 @@ export type MissionAction = BillActionInput & {
 }
 
 export type Mission = {
+  revision: number
   missionId: string
   manifestId: string
   ownerId: string

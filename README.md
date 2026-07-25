@@ -23,6 +23,8 @@ planned -> approved -> executing -> delivered
 
 ## Local setup
 
+Requires Node.js 22.13 or newer. Node.js 24.15+ is recommended for the newer release-candidate status of the built-in SQLite module.
+
 ```powershell
 npm install
 $env:POCKET_CONCIERGE_AGENT_KEYS='demo-agent:replace-with-a-long-random-secret'
@@ -56,6 +58,8 @@ Content-Type: application/json
 
 Use [openapi.yaml](./openapi.yaml) as the machine-readable contract and [examples/mission.json](./examples/mission.json) as a copy-paste request. The baseline boundary is recorded in [docs/PRE_HACKATHON_BASELINE.md](./docs/PRE_HACKATHON_BASELINE.md).
 
-## Current deployment boundary
+## Persistence
 
-The included store is in-memory and intended for local verification only. Production deployment requires a durable store with atomic compare-and-update semantics. Do not deploy this baseline behind multiple instances.
+Set `POCKET_CONCIERGE_DB_PATH=.data/concierge.sqlite` to enable durable SQLite storage with WAL and optimistic revision checks. Without it, the service intentionally uses an in-memory store for local tests.
+
+For the first public demo, run one service instance with one persistent volume. A horizontally scaled deployment should replace SQLite with a shared transactional database while preserving the `MissionStore` compare-and-update contract.

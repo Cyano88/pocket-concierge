@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import test from 'node:test'
 import { ConciergeService, type ConciergeDependencies } from '../src/service.js'
-import { MemoryMissionStore } from '../src/store.js'
+import { MemoryMissionStore, SqliteMissionStore } from '../src/store.js'
 
 const ownerId = 'agent-one'
 const now = Date.parse('2026-07-25T04:00:00.000Z')
@@ -179,4 +182,41 @@ test('rejects status URL SSRF, mismatched orders, and non-terminal evidence', as
     }),
     (error: any) => error.code === 'DOWNSTREAM_NOT_TERMINAL',
   )
+})
+
+test('SQLite persists missions and rejects stale concurrent writes', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'pocket-concierge-'))
+  const path = join(directory, 'missions.sqlite')
+  const first = new SqliteMissionStore(path)
+  try {
+    const app = new ConciergeService({ store: first, now: () => now, fetchJson: async () => ({}) })
+    const created = await app.create(ownerId, mission())
+    first.close()
+
+    const reopened = new SqliteMissionStore(path)
+    try {
+      const persisted = await reopened.get(ownerId, created.mission.externalId)
+      assert.equal(persisted?.manifestId, created.mission.manifestId)
+      const stale = structuredClone(persisted!)
+      const current = structuredClone(persisted!)
+      current.revision += 1
+      current.title = 'First atomic writer'
+      await reopened.update(current, persisted!.revision)
+      stale.revision += 1
+      stale.title = 'Stale writer'
+      await assert.rejects(
+        reopened.update(stale, persisted!.revision),
+        (error: any) => error.code === 'MISSION_WRITE_CONFLICT',
+      )
+    } finally {
+      reopened.close()
+    }
+  } finally {
+    try {
+      first.close()
+    } catch {
+      // The first handle is already closed after the persistence check.
+    }
+    await rm(directory, { recursive: true, force: true })
+  }
 })

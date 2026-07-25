@@ -61,11 +61,13 @@ export class ConciergeService {
       throw new ConciergeError('ACTION_NOT_APPROVABLE', `Action in ${action.state} state cannot be approved.`, 409)
     }
     if (action.state === 'planned') {
+      const expectedRevision = mission.revision
       action.state = 'approved'
       action.approvedAt = iso(this.dependencies.now())
       mission.state = 'active'
       mission.updatedAt = action.approvedAt
-      await this.dependencies.store.update(mission)
+      mission.revision += 1
+      await this.dependencies.store.update(mission, expectedRevision)
     }
     return publicMission(mission)
   }
@@ -80,10 +82,12 @@ export class ConciergeService {
       throw new ConciergeError('ACTION_NOT_DUE', 'Action is approved but not due yet.', 409)
     }
     if (action.state === 'approved') {
+      const expectedRevision = mission.revision
       action.state = 'executing'
       action.startedAt = iso(this.dependencies.now())
       mission.updatedAt = action.startedAt
-      await this.dependencies.store.update(mission)
+      mission.revision += 1
+      await this.dependencies.store.update(mission, expectedRevision)
     }
     return {
       missionId: mission.missionId,
@@ -155,6 +159,7 @@ export class ConciergeService {
     if (!TERMINAL_DELIVERED.has(state) && !NEEDS_REVIEW.has(state)) {
       throw new ConciergeError('DOWNSTREAM_NOT_TERMINAL', `Pocket Bills settlement is ${state}; retry verification later with the original status token.`, 409)
     }
+    const expectedRevision = mission.revision
     action.state = TERMINAL_DELIVERED.has(state) ? 'delivered' : 'needs_review'
     action.evidence = {
       settlementId,
@@ -167,7 +172,8 @@ export class ConciergeService {
       ? 'delivered'
       : mission.actions.some(item => item.state === 'needs_review') ? 'needs_review' : 'active'
     mission.updatedAt = action.evidence.verifiedAt
-    await this.dependencies.store.update(mission)
+    mission.revision += 1
+    await this.dependencies.store.update(mission, expectedRevision)
     return publicMission(mission)
   }
 
@@ -191,6 +197,7 @@ export class ConciergeService {
       }
     })
     return {
+      revision: 0,
       missionId,
       manifestId,
       ownerId,

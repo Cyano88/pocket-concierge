@@ -2,12 +2,13 @@ import { createServer, type IncomingMessage, type ServerResponse } from 'node:ht
 import { authenticate, parseAgentKeys } from './auth.js'
 import { ConciergeError } from './errors.js'
 import { ConciergeService, fetchJson } from './service.js'
-import { MemoryMissionStore } from './store.js'
+import { MemoryMissionStore, SqliteMissionStore } from './store.js'
 
 const PORT = Number(process.env.PORT || 4310)
 const keys = parseAgentKeys(process.env.POCKET_CONCIERGE_AGENT_KEYS)
+const databasePath = String(process.env.POCKET_CONCIERGE_DB_PATH || '').trim()
 const service = new ConciergeService({
-  store: new MemoryMissionStore(),
+  store: databasePath ? new SqliteMissionStore(databasePath) : new MemoryMissionStore(),
   now: () => Date.now(),
   fetchJson,
 })
