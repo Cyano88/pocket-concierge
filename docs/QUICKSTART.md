@@ -60,6 +60,8 @@ POST /v1/errands/{errandId}/authorize
 
 Send the returned `manifestId`. Concierge then returns the exact Pocket Bills request template and maximum allowed USDT. Merge the private customer fields locally, obtain a fresh OKX payment quote, show it to the user, and pay only after confirmation.
 
+Use [`examples/prepare-okx-bill.mjs`](../examples/prepare-okx-bill.mjs) for the complete buyer flow. It binds the quote to the immutable mission and sends the identical provider parameters during the signed replay. This matters: a payment authorization alone is not the purchase request, and omitting `externalOrderId`, service identifiers, or the locally resolved customer reference makes the merchant reject the replay.
+
 ## 3. Complete and verify
 
 After Pocket Bills returns `statusUrl` and `statusToken`, send them once:

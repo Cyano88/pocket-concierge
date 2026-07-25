@@ -110,6 +110,8 @@ node examples/prepare-okx-bill.mjs examples/mission.json .\private-inputs.json `
 
 The quote state is authenticated against the exact mission and private merchant request. It expires after four minutes. Immediately before invoking the fund-moving command, the client irreversibly marks it `payment_in_progress`, preventing a blind second payment after a crash or ambiguous CLI result.
 
+The same merchant parameters are included in both the quote command and the confirmed payment replay. Do not copy only the `paymentId`: Pocket Bills also requires the stable `externalOrderId`, service identifiers, and locally resolved customer reference to deliver the purchase.
+
 After success, the Pocket Bills status proof is encrypted locally with AES-256-GCM until Concierge verifies delivery. If verification is temporarily unavailable, retry only the proof:
 
 ```powershell

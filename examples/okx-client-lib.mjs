@@ -77,6 +77,42 @@ export function parseCliJson(stdout) {
   }
 }
 
+export function merchantParams(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    throw new Error('The merchant request body must be an object.')
+  }
+  return Object.entries(body).flatMap(([key, value]) => {
+    if (!key || value === undefined || value === null) {
+      throw new Error('Merchant request parameters must have a key and value.')
+    }
+    return ['--param', `${key}=${String(value)}`]
+  })
+}
+
+export function buildQuoteCommandArgs(url, body) {
+  if (!/^https:\/\//.test(String(url))) throw new Error('The payment endpoint must use HTTPS.')
+  return ['payment', 'quote', String(url), '--method', 'POST', ...merchantParams(body)]
+}
+
+export function buildPaymentCommandArgs(paymentId, acceptsIndex, body) {
+  if (!/^pay_[a-zA-Z0-9]+$/.test(String(paymentId))) {
+    throw new Error('The confirmed paymentId is invalid.')
+  }
+  if (!Number.isInteger(acceptsIndex) || acceptsIndex < 0) {
+    throw new Error('The confirmed acceptsIndex is invalid.')
+  }
+  return [
+    'payment',
+    'pay',
+    '--payment-id',
+    String(paymentId),
+    '--selected-index',
+    String(acceptsIndex),
+    ...merchantParams(body),
+    '--yes',
+  ]
+}
+
 export function selectQuote(data, maximumUsdt, requestedIndex) {
   if (!data || typeof data !== 'object' || data.needsConfirm !== true || typeof data.paymentId !== 'string') {
     throw new Error('Onchain OS did not return a confirmable payment quote.')

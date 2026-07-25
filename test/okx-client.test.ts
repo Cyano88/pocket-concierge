@@ -3,6 +3,8 @@ import test from 'node:test'
 import {
   bindingMatches,
   bodyBinding,
+  buildPaymentCommandArgs,
+  buildQuoteCommandArgs,
   findStatusProof,
   openJson,
   parseCliJson,
@@ -95,4 +97,25 @@ test('finds a Pocket Bills status proof in a nested CLI receipt', () => {
 test('accepts only clean JSON from Onchain OS', () => {
   assert.deepEqual(parseCliJson('{"ok":true}'), { ok: true })
   assert.throws(() => parseCliJson('banner\n{"ok":true}'), /unreadable/)
+})
+
+test('binds the identical merchant parameters into quote and paid replay commands', () => {
+  const merchantBody = {
+    externalOrderId: 'concierge:mission:action:cycle',
+    category: 'data',
+    serviceId: 'mtn-data',
+    variationCode: 'mtn-10mb-100',
+    customerReference: '08000000000',
+  }
+  const quoteArgs = buildQuoteCommandArgs('https://bills.hashpaylink.com/v1/okx/bills', merchantBody)
+  const paymentArgs = buildPaymentCommandArgs('pay_verified', 0, merchantBody)
+  const expectedParams = Object.entries(merchantBody).flatMap(([key, value]) => ['--param', `${key}=${value}`])
+
+  assert.deepEqual(quoteArgs.slice(-expectedParams.length), expectedParams)
+  assert.deepEqual(
+    paymentArgs.slice(paymentArgs.indexOf('--param'), paymentArgs.indexOf('--yes')),
+    expectedParams,
+  )
+  assert.equal(paymentArgs.at(-1), '--yes')
+  assert.throws(() => buildPaymentCommandArgs('invalid', 0, merchantBody), /paymentId/)
 })

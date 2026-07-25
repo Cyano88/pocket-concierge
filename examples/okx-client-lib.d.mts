@@ -10,6 +10,13 @@ export function sealJson(value: unknown, key: string): {
 }
 export function openJson(sealed: unknown, key: string): unknown
 export function parseCliJson(stdout: unknown): unknown
+export function merchantParams(body: Record<string, unknown>): string[]
+export function buildQuoteCommandArgs(url: string, body: Record<string, unknown>): string[]
+export function buildPaymentCommandArgs(
+  paymentId: string,
+  acceptsIndex: number,
+  body: Record<string, unknown>,
+): string[]
 export function selectQuote(
   data: unknown,
   maximumUsdt: string,

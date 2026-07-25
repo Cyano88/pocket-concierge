@@ -4,6 +4,8 @@ import { dirname } from 'node:path'
 import {
   bindingMatches,
   bodyBinding,
+  buildPaymentCommandArgs,
+  buildQuoteCommandArgs,
   findStatusProof,
   openJson,
   parseCliJson,
@@ -157,7 +159,6 @@ if (merchantBody.category === 'electricity' && !merchantBody.amountNgn) {
   throw new Error('amountNgn is required for electricity.')
 }
 
-const params = Object.entries(merchantBody).flatMap(([key, value]) => ['--param', `${key}=${value}`])
 const privateValues = [
   merchantBody.customerReference,
   merchantBody.contactPhone,
@@ -172,7 +173,7 @@ if (options.quote) {
     if (!(error && typeof error === 'object' && error.code === 'ENOENT')) throw error
   }
   const quoteResult = onchainos(
-    ['payment', 'quote', started.execution.request.url, '--method', 'POST', ...params],
+    buildQuoteCommandArgs(started.execution.request.url, merchantBody),
     privateValues,
   )
   if (quoteResult?.ok !== true) throw new Error('Onchain OS did not return a successful quote response.')
@@ -239,16 +240,10 @@ if (options.confirmPayment) {
     phase: 'payment_in_progress',
     confirmationRecordedAt: new Date().toISOString(),
   })
-  const paid = onchainos([
-    'payment',
-    'pay',
-    '--payment-id',
-    state.paymentId,
-    '--selected-index',
-    String(state.acceptsIndex),
-    ...params,
-    '--yes',
-  ], privateValues)
+  const paid = onchainos(
+    buildPaymentCommandArgs(state.paymentId, state.acceptsIndex, merchantBody),
+    privateValues,
+  )
   if (paid?.ok !== true || paid?.data?.status !== 'success') {
     const status = String(paid?.data?.status || 'unknown')
     let paymentError = String(paid?.data?.error || paid?.error || 'No payment error was returned.')
