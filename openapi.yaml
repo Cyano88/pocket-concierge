@@ -1,0 +1,191 @@
+openapi: 3.1.0
+info:
+  title: Pocket Concierge API
+  version: 0.1.0
+  description: Privacy-limited mission orchestration for buyer agents. This baseline supports OKX Pocket Bills actions only.
+servers:
+  - url: http://localhost:4310
+security:
+  - bearerAuth: []
+paths:
+  /health:
+    get:
+      security: []
+      operationId: health
+      responses:
+        "200":
+          description: Service health
+  /v1/contract:
+    get:
+      security: []
+      operationId: getContract
+      responses:
+        "200":
+          description: Supported actions and trust boundary
+  /v1/missions/preview:
+    post:
+      operationId: previewMission
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MissionInput"
+      responses:
+        "200":
+          description: Deterministic mission preview; nothing is persisted or paid
+  /v1/missions:
+    post:
+      operationId: createMission
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MissionInput"
+      responses:
+        "201":
+          description: Created mission, or an idempotent replay of the same immutable manifest
+        "409":
+          description: externalId was already used for a different manifest
+  /v1/missions/{externalId}:
+    get:
+      operationId: getMission
+      parameters:
+        - $ref: "#/components/parameters/ExternalId"
+      responses:
+        "200":
+          description: Mission and sanitized evidence
+        "404":
+          description: Mission not found
+  /v1/missions/{externalId}/actions/{actionId}/approve:
+    post:
+      operationId: approveAction
+      parameters:
+        - $ref: "#/components/parameters/ExternalId"
+        - $ref: "#/components/parameters/ActionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [manifestId]
+              properties:
+                manifestId:
+                  type: string
+      responses:
+        "200":
+          description: Exact manifest approved
+        "409":
+          description: Manifest mismatch or invalid state
+  /v1/missions/{externalId}/actions/{actionId}/start:
+    post:
+      operationId: startAction
+      parameters:
+        - $ref: "#/components/parameters/ExternalId"
+        - $ref: "#/components/parameters/ActionId"
+      responses:
+        "200":
+          description: Buyer-side OKX execution instruction; no payment is made
+        "409":
+          description: Action is not approved or due
+  /v1/missions/{externalId}/actions/{actionId}/verify:
+    post:
+      operationId: verifyAction
+      parameters:
+        - $ref: "#/components/parameters/ExternalId"
+        - $ref: "#/components/parameters/ActionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [statusUrl, statusToken]
+              properties:
+                statusUrl:
+                  type: string
+                  format: uri
+                statusToken:
+                  type: string
+                  writeOnly: true
+      responses:
+        "200":
+          description: Sanitized terminal settlement evidence
+        "409":
+          description: Settlement is not terminal
+        "502":
+          description: Downstream evidence failed verification
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  parameters:
+    ExternalId:
+      name: externalId
+      in: path
+      required: true
+      schema:
+        type: string
+    ActionId:
+      name: actionId
+      in: path
+      required: true
+      schema:
+        type: string
+  schemas:
+    MissionInput:
+      type: object
+      additionalProperties: false
+      required: [externalId, title, timezone, actions]
+      properties:
+        externalId:
+          type: string
+          minLength: 8
+          maxLength: 128
+          description: Caller-provided idempotency identifier
+        title:
+          type: string
+          maxLength: 160
+        timezone:
+          type: string
+          examples: [Africa/Lagos]
+        actions:
+          type: array
+          minItems: 1
+          maxItems: 10
+          items:
+            $ref: "#/components/schemas/OkxBillAction"
+    OkxBillAction:
+      type: object
+      additionalProperties: false
+      required: [type, reference, description, dueAt, category, serviceId, variationCode, privateInputRef, maximumUsdt]
+      properties:
+        type:
+          const: okx_bill
+        reference:
+          type: string
+          description: Unique action reference inside the mission
+        description:
+          type: string
+        dueAt:
+          type: string
+          format: date-time
+        category:
+          type: string
+          enum: [data, electricity, tv]
+        serviceId:
+          type: string
+        variationCode:
+          type: string
+        privateInputRef:
+          type: string
+          description: Opaque local reference; never a phone, meter, or smartcard number
+        maximumUsdt:
+          type: string
+          pattern: "^(?:0|[1-9][0-9]*)(?:\\.[0-9]{1,6})?$"
+          description: Hard buyer-side payment ceiling
