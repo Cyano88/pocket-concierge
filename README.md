@@ -4,7 +4,7 @@ Pocket Concierge is a deterministic authority and buyer-agent orchestrator for h
 
 Its first adapter supports a user-approved Nigerian bill purchase through Pocket Bills and the OKX Agent Payments Protocol. Before execution, a versioned mandate checks time, category, service, opaque recipient, action count, per-action spend, total mission spend, and approval threshold. The deterministic result is `APPROVE`, `ESCALATE`, or `BLOCK`; no LLM decides whether payment is allowed.
 
-For OKX marketplace testing, `GET /v1/okx/authority-proof` always begins with a zero-fee x402 challenge. The required signed replay returns the privacy-safe proof of a real delivered mission: payment transaction, downstream settlement, deterministic decision trace, recomputable authority receipt, and the five-minute integration contract. This public proof route never accepts or returns household account data.
+For OKX marketplace testing, `GET /v1/okx/authority-proof` always begins with a 0.01-USDT x402 challenge. The required signed replay returns the privacy-safe proof of a real delivered mission: payment transaction, downstream settlement, deterministic decision trace, recomputable authority receipt, and the five-minute integration contract. This public proof route never accepts or returns household account data.
 
 The hosted Concierge service never:
 

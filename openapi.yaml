@@ -21,7 +21,7 @@ paths:
                 type: object
                 required: [ok, service, integration, proof]
         "402":
-          description: Zero-fee x402 payment challenge on X Layer; signed replay is required
+          description: 0.01-USDT x402 payment challenge on X Layer; signed replay is required
           headers:
             PAYMENT-REQUIRED:
               required: true

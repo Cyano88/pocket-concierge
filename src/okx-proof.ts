@@ -2,8 +2,8 @@ import { verifyAuthorityReceipt } from './authority.js'
 import type { AuthorityReceipt } from './types.js'
 
 export const OKX_AUTHORITY_PROOF_ROUTE = '/v1/okx/authority-proof'
-export const OKX_AUTHORITY_PROOF_FEE_USDT = '0'
-export const OKX_AUTHORITY_PROOF_FEE_ATOMIC = '0'
+export const OKX_AUTHORITY_PROOF_FEE_USDT = '0.01'
+export const OKX_AUTHORITY_PROOF_FEE_ATOMIC = '10000'
 export const XLAYER_USDT0 = '0x779ded0c9e1022225f8e0630b35a9b54be713736'
 
 export function buildOkxAuthorityProof(receipt: AuthorityReceipt, transaction: string, baseUrl: string) {

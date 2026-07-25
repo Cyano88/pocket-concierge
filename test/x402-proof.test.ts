@@ -74,7 +74,7 @@ const receipt: AuthorityReceipt = {
   ...receiptCore,
 }
 
-test('authority proof endpoint advertises the required zero-fee EIP-3009 USDT acceptance', async () => {
+test('authority proof endpoint advertises the required 0.01-USDT EIP-3009 acceptance', async () => {
   const protector = new OkxAuthorityProofProtector({
     apiKey: 'api-key',
     secretKey: 'secret-key',
@@ -92,7 +92,7 @@ test('authority proof endpoint advertises the required zero-fee EIP-3009 USDT ac
   assert.deepEqual(challenge.accepts, [{
     scheme: 'exact',
     network: 'eip155:196',
-    amount: '0',
+    amount: '10000',
     asset: XLAYER_USDT0,
     payTo,
     maxTimeoutSeconds: 300,
