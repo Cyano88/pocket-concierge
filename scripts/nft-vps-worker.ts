@@ -1,6 +1,13 @@
-import { AwsKmsNftSignerBackend } from '../src/nft-aws-kms-backend.js'
+import { readFileSync } from 'node:fs'
+import { createInterface } from 'node:readline/promises'
+import { stdin, stdout } from 'node:process'
+import { getAddress } from 'viem'
 import { NftHardenedSigner } from '../src/nft-hardened-signer.js'
-import type { AssistedNftAction } from '../src/nft-assisted-worker.js'
+import {
+  validateAssistedNftPlan,
+  type AssistedNftAction,
+} from '../src/nft-assisted-worker.js'
+import { VpsNftSignerBackend } from '../src/nft-vps-signer-backend.js'
 
 const ACTIONS = new Set<AssistedNftAction>(['mint', 'deliver', 'refund'])
 
@@ -31,6 +38,37 @@ async function postJson(url: string, headers: Record<string, string>, body?: unk
   return payload
 }
 
+async function hidden(prompt: string) {
+  if (!stdin.isTTY || typeof stdin.setRawMode !== 'function') {
+    throw new Error('An interactive terminal is required to unlock the keystore.')
+  }
+  stdout.write(prompt)
+  stdin.setRawMode(true)
+  stdin.resume()
+  stdin.setEncoding('utf8')
+  let value = ''
+  try {
+    for await (const chunk of stdin.iterator({ destroyOnReturn: false })) {
+      for (const character of chunk) {
+        if (character === '\u0003') throw new Error('Cancelled.')
+        if (character === '\r' || character === '\n') {
+          stdout.write('\n')
+          return value
+        }
+        if (character === '\u007f' || character === '\b') {
+          value = value.slice(0, -1)
+        } else {
+          value += character
+        }
+      }
+    }
+  } finally {
+    stdin.setRawMode(false)
+    stdin.pause()
+  }
+  throw new Error('Terminal closed before password entry.')
+}
+
 async function submitForVerification(
   baseUrl: string,
   externalId: string,
@@ -54,7 +92,7 @@ async function submitForVerification(
   }
   throw new Error(
     `Transaction was broadcast but Pocket verification is incomplete: ${lastError}. `
-    + 'Recover this hash; do not prepare or sign another plan.',
+    + `Recover transaction ${transactionHash}; never prepare or sign a replacement blindly.`,
   )
 }
 
@@ -62,33 +100,59 @@ async function main() {
   const action = process.argv[2] as AssistedNftAction | undefined
   const externalId = process.argv[3]
   if (!action || !ACTIONS.has(action) || !externalId) {
-    throw new Error('Usage: npm run nft:kms-worker -- <mint|deliver|refund> <externalId>')
+    throw new Error('Usage: npm run nft:vps-worker -- <mint|deliver|refund> <externalId>')
   }
   const baseUrl = requiredEnv('POCKET_CONCIERGE_URL').replace(/\/$/, '')
   const operatorKey = requiredEnv('POCKET_CONCIERGE_NFT_OPERATOR_KEY')
   const workerId = requiredEnv('POCKET_CONCIERGE_NFT_WORKER_ID')
   const treasuryAddress = requiredEnv('POCKET_CONCIERGE_NFT_TREASURY_ADDRESS')
   const maximumFeePerGasWei = requiredEnv('POCKET_CONCIERGE_NFT_WORKER_MAX_FEE_PER_GAS_WEI')
+  const constraints = { action, externalId, treasuryAddress, workerId, maximumFeePerGasWei }
+
+  const password = await hidden('Keystore password: ')
+  const backend = await VpsNftSignerBackend.fromEncryptedKeystore(
+    readFileSync(requiredEnv('POCKET_CONCIERGE_NFT_KEYSTORE_PATH'), 'utf8'),
+    password,
+    { rpcUrl: requiredEnv('ETHEREUM_RPC_URL') },
+  )
+  if (getAddress(await backend.address()) !== getAddress(treasuryAddress)) {
+    throw new Error('Encrypted keystore address does not match the configured Pocket treasury.')
+  }
+
+  const raw = await postJson(
+    `${baseUrl}/v1/nft-mints/orders/${encodeURIComponent(externalId)}/${planEndpoint(action)}`,
+    { 'X-Operator-Key': operatorKey, 'X-Worker-Id': workerId },
+  )
+  const plan = validateAssistedNftPlan(raw, constraints)
+  console.log(JSON.stringify({
+    status: 'validated_not_signed',
+    action,
+    externalId,
+    planId: plan.planId,
+    chainId: plan.transaction.chainId,
+    from: plan.transaction.from,
+    to: plan.transaction.to,
+    valueWei: plan.transaction.valueWei,
+    gasLimit: plan.transaction.gasLimit,
+    gasPriceCeilingWei: plan.transaction.maxFeePerGasWei,
+    nonce: plan.transaction.nonce,
+    expiresAt: plan.expiresAt,
+  }, null, 2))
+
+  const prompt = createInterface({ input: stdin, output: stdout })
+  try {
+    const confirmation = await prompt.question(`Type ${plan.planId} to sign and broadcast: `)
+    if (confirmation !== plan.planId) throw new Error('Execution cancelled: plan ID was not confirmed exactly.')
+  } finally {
+    prompt.close()
+  }
+
   const signer = new NftHardenedSigner(
     requiredEnv('POCKET_CONCIERGE_NFT_SIGNER_DB_PATH'),
-    new AwsKmsNftSignerBackend({
-      keyId: requiredEnv('POCKET_CONCIERGE_NFT_KMS_KEY_ID'),
-      rpcUrl: requiredEnv('ETHEREUM_RPC_URL'),
-      region: requiredEnv('AWS_REGION'),
-    }),
+    backend,
   )
   try {
-    const raw = await postJson(
-      `${baseUrl}/v1/nft-mints/orders/${encodeURIComponent(externalId)}/${planEndpoint(action)}`,
-      { 'X-Operator-Key': operatorKey, 'X-Worker-Id': workerId },
-    )
-    const result = await signer.execute(raw, {
-      action,
-      externalId,
-      treasuryAddress,
-      workerId,
-      maximumFeePerGasWei,
-    })
+    const result = await signer.execute(raw, constraints)
     const verified = await submitForVerification(
       baseUrl,
       externalId,
@@ -97,7 +161,7 @@ async function main() {
       result.transactionHash,
     )
     console.log(JSON.stringify({
-      status: 'broadcast_and_submitted_for_verification',
+      status: 'broadcast_and_verified',
       action,
       externalId,
       planId: result.planId,
