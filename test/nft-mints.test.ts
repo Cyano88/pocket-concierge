@@ -404,6 +404,35 @@ test('direct SeaDrop builder rejects inactive, capped, sold-out, and unpayable s
   }
 })
 
+test('refund verifier canonicalizes lowercase RPC addresses', async () => {
+  const client = {
+    async getTransaction() {
+      return {
+        from: TREASURY.toLowerCase(),
+        to: REFUND.toLowerCase(),
+        value: 123n,
+        input: '0x',
+      }
+    },
+    async getTransactionReceipt() {
+      return {
+        status: 'success',
+        blockNumber: 100n,
+        gasUsed: 21_000n,
+        effectiveGasPrice: 1n,
+      }
+    },
+    async getBlockNumber() {
+      return 101n
+    },
+  } as unknown as PublicClient
+  const gateway = new EthereumNftChainGateway('https://rpc.example', client)
+  const refund = await gateway.verifyRefund(REFUND_HASH, TREASURY, REFUND, 123n)
+  assert.equal(refund.from, TREASURY)
+  assert.equal(refund.to, REFUND)
+  assert.equal(refund.confirmations, 2)
+})
+
 test('arms only after a matching, sufficiently confirmed Ethereum deposit', async () => {
   const { app, chain } = service()
   await app.create('agent-one', input())

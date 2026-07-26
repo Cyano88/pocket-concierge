@@ -383,7 +383,7 @@ export class EthereumNftChainGateway implements NftChainGateway {
     ])
     if (
       receipt.status !== 'success'
-      || transaction.from !== treasuryAddress
+      || getAddress(transaction.from) !== treasuryAddress
       || transaction.to === null
       || getAddress(transaction.to) !== refundAddress
       || transaction.value !== amountWei
