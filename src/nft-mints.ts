@@ -3,7 +3,7 @@ import { getAddress, isAddress, type Address, type Hex } from 'viem'
 import { ConciergeError } from './errors.js'
 import { calldataDigest, type NftChainGateway } from './nft-chain.js'
 import type { NftMintStore } from './nft-store.js'
-import type { CreateNftMintOrderInput, NftMintOrder } from './nft-types.js'
+import type { BuiltMintTransaction, CreateNftMintOrderInput, NftMintOrder } from './nft-types.js'
 
 const SAFE_ID = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{7,127}$/
 const COLLECTION_SLUG = /^[a-z0-9][a-z0-9-]{1,99}$/
@@ -12,6 +12,7 @@ const UINT = /^(0|[1-9][0-9]*)$/
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
 const MIN_ASSISTED_REFUND_MAX_FEE_PER_GAS_WEI = 1_500_000_000n
 const ASSISTED_REFUND_BALANCE_HEADROOM_PERCENT = 20n
+const PREVIEW_FALLBACK_MINT_GAS_LIMIT = 350_000n
 
 export const NFT_MINT_SERVICE_FEE_ATOMIC = '1000000'
 export const NFT_MINT_ORDER_ROUTE = '/v1/okx/nft-mints/orders'
@@ -164,11 +165,7 @@ export class NftMintService {
     if (mintPriceWei > BigInt(input.maxMintPriceWei)) {
       throw new ConciergeError('NFT_MINT_PRICE_LIMIT', 'Current mint price exceeds the customer mandate.', 409)
     }
-    const [estimatedMintGas, maxFeePerGas] = await Promise.all([
-      this.dependencies.chain.estimateMintGas(transaction, this.dependencies.treasuryAddress),
-      this.dependencies.chain.maxFeePerGas(),
-    ])
-    const mintGasLimit = estimatedMintGas * 120n / 100n
+    const { mintGasLimit, maxFeePerGas, estimationMode } = await this.estimateExecution(transaction, true)
     const maximumEstimatedTotalWei = mintPriceWei + maxFeePerGas * (
       mintGasLimit + this.dependencies.deliveryGasLimit + this.dependencies.refundGasLimit
     )
@@ -197,6 +194,7 @@ export class NftMintService {
         currentMintPriceWei: mintPriceWei.toString(),
         maxFeePerGasWei: maxFeePerGas.toString(),
         mintGasLimit: mintGasLimit.toString(),
+        estimationMode,
         deliveryGasReserve: this.dependencies.deliveryGasLimit.toString(),
         refundGasReserve: this.dependencies.refundGasLimit.toString(),
         maximumEstimatedTotalWei: maximumEstimatedTotalWei.toString(),
@@ -446,11 +444,7 @@ export class NftMintService {
     if (mintValue > BigInt(order.maxMintPriceWei)) {
       throw new ConciergeError('NFT_MINT_PRICE_LIMIT', 'Current mint price exceeds the customer mandate.', 409)
     }
-    const [estimatedMintGas, maxFeePerGas] = await Promise.all([
-      this.dependencies.chain.estimateMintGas(transaction, order.treasuryAddress),
-      this.dependencies.chain.maxFeePerGas(),
-    ])
-    const gasLimit = estimatedMintGas * 120n / 100n
+    const { mintGasLimit: gasLimit, maxFeePerGas } = await this.estimateExecution(transaction)
     const maximumExecutionCost = mintValue + maxFeePerGas * (
       gasLimit + this.dependencies.deliveryGasLimit + this.dependencies.refundGasLimit
     )
@@ -754,6 +748,43 @@ export class NftMintService {
   private assertOrderLimit(input: CreateNftMintOrderInput) {
     if (BigInt(input.maxTotalCostWei) > this.dependencies.maximumOrderWei) {
       throw new ConciergeError('NFT_ORDER_LIMIT_EXCEEDED', 'maxTotalCostWei exceeds the configured pilot limit.', 409)
+    }
+  }
+
+  private async estimateExecution(transaction: BuiltMintTransaction, allowGasFallback = false) {
+    let maxFeePerGas: bigint
+    try {
+      maxFeePerGas = await this.dependencies.chain.maxFeePerGas()
+    } catch {
+      throw new ConciergeError(
+        'NFT_EXECUTION_ESTIMATE_UNAVAILABLE',
+        'Ethereum fee data is currently unavailable. No order or deposit was accepted.',
+        503,
+      )
+    }
+    try {
+      const estimatedMintGas = await this.dependencies.chain.estimateMintGas(
+        transaction,
+        this.dependencies.treasuryAddress,
+      )
+      return {
+        mintGasLimit: estimatedMintGas * 120n / 100n,
+        maxFeePerGas,
+        estimationMode: 'live-simulation' as const,
+      }
+    } catch {
+      if (allowGasFallback) {
+        return {
+          mintGasLimit: PREVIEW_FALLBACK_MINT_GAS_LIMIT,
+          maxFeePerGas,
+          estimationMode: 'conservative-fallback' as const,
+        }
+      }
+      throw new ConciergeError(
+        'NFT_EXECUTION_ESTIMATE_UNAVAILABLE',
+        'Ethereum could not currently simulate the bounded mint from the execution treasury. No order or deposit was accepted.',
+        503,
+      )
     }
   }
 

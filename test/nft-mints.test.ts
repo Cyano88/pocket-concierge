@@ -187,6 +187,7 @@ test('previews a supported public mint without creating an order or accepting fu
   assert.equal(preview.scope.mintMechanism, 'official-seadrop-1.0-public-drop')
   assert.equal(preview.quote.currentMintPriceWei, '10000000000000000')
   assert.equal(preview.quote.maximumEstimatedTotalWei, '19630000000000000')
+  assert.equal(preview.quote.estimationMode, 'live-simulation')
   assert.equal(preview.quote.requiredDepositWei, '30000000000000000')
   assert.equal(preview.quote.serviceFee.amountAtomic, '1000000')
   assert.equal(preview.mandate.withinLimits, true)
@@ -202,6 +203,18 @@ test('preview rejects a live total-cost estimate outside the customer mandate', 
     })),
     (error: unknown) => (error as { code?: string }).code === 'NFT_TOTAL_COST_LIMIT',
   )
+})
+
+test('preview uses a disclosed conservative gas reserve when an unfunded treasury cannot simulate', async () => {
+  const chain = new FakeChain()
+  chain.estimateMintGas = async () => {
+    throw new Error('rpc simulation failed')
+  }
+  const { app } = service(undefined, chain)
+  const preview = await app.preview(input())
+  assert.equal(preview.quote.estimationMode, 'conservative-fallback')
+  assert.equal(preview.quote.mintGasLimit, '350000')
+  assert.equal(preview.quote.maximumEstimatedTotalWei, '24730000000000000')
 })
 
 test('creates an immutable customer-funded order and replays idempotently', async () => {
