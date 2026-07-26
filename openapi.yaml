@@ -53,6 +53,19 @@ paths:
       responses:
         "200":
           description: Verified, supported, and unavailable errand adapters
+  /v1/public/nft-pilot:
+    get:
+      security: []
+      operationId: getVerifiedNftPilotProof
+      summary: Read the privacy-safe proof of Pocket's completed Ethereum mint, delivery, and refund pilot
+      description: |
+        Returns only public-chain evidence and immutable spending limits. Wallet credentials,
+        order capability tokens, operator keys, and private customer references are excluded.
+      responses:
+        "200":
+          description: Recomputable proof with X Layer payment, Ethereum funding, mint, delivery, refund, and explorer links
+        "503":
+          description: No fully verified public pilot has been configured
   /v1/okx/nft-mints/orders:
     post:
       security:

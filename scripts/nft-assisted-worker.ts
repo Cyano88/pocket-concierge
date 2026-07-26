@@ -2,6 +2,7 @@ import { spawnSync } from 'node:child_process'
 import { createInterface } from 'node:readline/promises'
 import { stdin as input, stdout as output } from 'node:process'
 import {
+  assistedWalletArguments,
   validateAssistedNftPlan,
   type AssistedNftAction,
   type ValidatedAssistedPlan,
@@ -130,7 +131,7 @@ function scan(plan: ValidatedAssistedPlan) {
     '--gas',
     plan.transaction.gasLimit,
     '--gas-price',
-    plan.transaction.maxFeePerGasWei,
+    `0x${BigInt(plan.transaction.maxFeePerGasWei).toString(16)}`,
   ])
   if (result.status !== 0) {
     throw new Error(`Security scan failed closed: ${result.stderr || result.stdout || `exit ${result.status}`}`)
@@ -142,39 +143,87 @@ function scan(plan: ValidatedAssistedPlan) {
   return action
 }
 
-function contractArguments(plan: ValidatedAssistedPlan) {
-  return [
-    'wallet',
-    'contract-call',
-    '--chain',
-    'ethereum',
-    '--from',
-    plan.transaction.from,
-    '--to',
-    plan.transaction.to,
-    '--amt',
-    plan.transaction.valueWei,
-    '--input-data',
-    plan.transaction.data,
-    '--gas-limit',
-    plan.transaction.gasLimit,
-    '--biz-type',
-    'dapp',
-    '--strategy',
-    'pocket-nft-assisted-worker',
-  ]
+function verificationTarget(action: AssistedNftAction) {
+  if (action === 'mint') return { endpoint: 'minted', field: 'mintTransactionHash' }
+  if (action === 'deliver') return { endpoint: 'delivered', field: 'deliveryTransactionHash' }
+  return { endpoint: 'refunded', field: 'refundTransactionHash' }
+}
+
+async function recordTransaction(
+  baseUrl: string,
+  externalId: string,
+  action: AssistedNftAction,
+  operatorKey: string,
+  hash: string,
+) {
+  const target = verificationTarget(action)
+  let lastMessage = 'verification pending'
+  for (let attempt = 1; attempt <= 6; attempt += 1) {
+    try {
+      const response = await fetch(
+        `${baseUrl}/v1/nft-mints/orders/${encodeURIComponent(externalId)}/${target.endpoint}`,
+        {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'X-Operator-Key': operatorKey,
+          },
+          body: JSON.stringify({ [target.field]: hash }),
+        },
+      )
+      const payload = await response.json().catch(() => ({ error: 'non_json_response' }))
+      if (response.ok && payload?.ok === true) {
+        const order = payload.order && typeof payload.order === 'object'
+          ? payload.order as Record<string, unknown>
+          : {}
+        console.log(JSON.stringify({
+          status: 'verified',
+          action,
+          externalId,
+          state: order.state,
+          transactionHash: hash,
+        }, null, 2))
+        return
+      }
+      lastMessage = typeof payload?.message === 'string'
+        ? payload.message
+        : typeof payload?.error === 'string'
+          ? payload.error
+          : `HTTP ${response.status}`
+      if (response.status !== 409) break
+    } catch {
+      lastMessage = 'Pocket verification endpoint was unreachable'
+    }
+    await new Promise(resolve => setTimeout(resolve, 5_000))
+  }
+  throw new Error(
+    `Transaction broadcast but verification is incomplete: ${lastMessage}. `
+    + `Recover without rebroadcasting: npm run nft:worker -- ${action} ${externalId} --transaction-hash ${hash}`,
+  )
 }
 
 async function main() {
   const action = process.argv[2] as AssistedNftAction | undefined
   const externalId = process.argv[3]
   const execute = process.argv.includes('--execute')
+  const hashIndex = process.argv.indexOf('--transaction-hash')
+  const recoveryHash = hashIndex >= 0 ? process.argv[hashIndex + 1] : undefined
   if (!action || !ACTIONS.has(action) || !externalId) {
-    throw new Error('Usage: npm run nft:worker -- <mint|deliver|refund> <externalId> [--execute]')
+    throw new Error(
+      'Usage: npm run nft:worker -- <mint|deliver|refund> <externalId> '
+      + '[--execute | --transaction-hash 0x...]',
+    )
   }
 
   const baseUrl = requiredEnv('POCKET_CONCIERGE_URL').replace(/\/$/, '')
   const operatorKey = requiredEnv('POCKET_CONCIERGE_NFT_OPERATOR_KEY')
+  if (recoveryHash) {
+    if (!/^0x[0-9a-fA-F]{64}$/.test(recoveryHash)) {
+      throw new Error('--transaction-hash must be a full EVM transaction hash.')
+    }
+    await recordTransaction(baseUrl, externalId, action, operatorKey, recoveryHash)
+    return
+  }
   const treasuryAddress = requiredEnv('POCKET_CONCIERGE_NFT_TREASURY_ADDRESS')
   const maximumFeePerGasWei = requiredEnv('POCKET_CONCIERGE_NFT_WORKER_MAX_FEE_PER_GAS_WEI')
   const raw = await fetchPlan(baseUrl, externalId, action, operatorKey)
@@ -194,10 +243,30 @@ async function main() {
     if (approval !== plan.planId) throw new Error('Execution cancelled: plan ID was not confirmed exactly.')
     if (Date.parse(plan.expiresAt) - Date.now() < 5_000) throw new Error('Execution cancelled: plan expired before wallet confirmation.')
 
-    const args = contractArguments(plan)
+    const args = assistedWalletArguments(plan)
+    if (action === 'refund') {
+      const finalApproval = await prompt.question(
+        `Type CONFIRM ${plan.planId} to broadcast this exact native-ETH refund: `,
+      )
+      if (finalApproval !== `CONFIRM ${plan.planId}`) throw new Error('Execution cancelled before broadcast.')
+      if (Date.parse(plan.expiresAt) - Date.now() < 2_000) throw new Error('Execution cancelled: plan expired before broadcast.')
+      const sent = onchainos(args)
+      if (sent.status !== 0) throw new Error(`Wallet broadcast failed: ${readableError(sent)}`)
+      const payload = parseJsonOutput(sent.stdout)
+      const hash = transactionHash(dataOf(payload))
+      if (!hash) throw new Error('Wallet reported success without a transaction hash; do not retry the transfer.')
+      printSafeWalletResult(payload)
+      await recordTransaction(baseUrl, externalId, action, operatorKey, hash)
+      return
+    }
+
     const first = onchainos(args)
     if (first.status === 0) {
-      printSafeWalletResult(parseJsonOutput(first.stdout))
+      const payload = parseJsonOutput(first.stdout)
+      const hash = transactionHash(dataOf(payload))
+      if (!hash) throw new Error('Wallet reported success without a transaction hash; do not retry the action.')
+      printSafeWalletResult(payload)
+      await recordTransaction(baseUrl, externalId, action, operatorKey, hash)
       return
     }
     if (first.status !== 2) throw new Error(`Wallet rejected the transaction request: ${readableError(first)}`)
@@ -214,7 +283,11 @@ async function main() {
 
     const forced = onchainos([...args, '--force'])
     if (forced.status !== 0) throw new Error(`Wallet broadcast failed: ${readableError(forced)}`)
-    printSafeWalletResult(parseJsonOutput(forced.stdout))
+    const payload = parseJsonOutput(forced.stdout)
+    const hash = transactionHash(dataOf(payload))
+    if (!hash) throw new Error('Wallet reported success without a transaction hash; do not retry the action.')
+    printSafeWalletResult(payload)
+    await recordTransaction(baseUrl, externalId, action, operatorKey, hash)
   } finally {
     prompt.close()
   }

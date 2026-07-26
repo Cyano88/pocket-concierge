@@ -138,10 +138,29 @@ The NFT adapter is intentionally disabled by default. Its narrow supported contr
 - A separate native-ETH execution deposit sent before the mint window.
 - Pocket temporarily mints to its treasury and transfers the exact token to the declared recipient.
 
+The completed public pilot proof is available at:
+
+```text
+GET https://pocket-concierge-production.up.railway.app/v1/public/nft-pilot
+```
+
+It contains the X Layer service payment, Ethereum funding, mint, delivery, refund, token ID,
+recomputable proof hash, and explorer links. It excludes capability tokens, credentials, operator
+keys, and private customer references.
+
 Create the paid order with `POST /v1/okx/nft-mints/orders` using
 [examples/nft-mint-order.json](./examples/nft-mint-order.json). The signed replay returns an
 `orderAccessToken`, the Ethereum treasury address, and the required maximum deposit. The caller then
 sends ETH from the immutable `fundingAddress` and submits the full Ethereum transaction hash:
+
+```powershell
+$env:POCKET_CONCIERGE_NFT_PILOT_KEY='<pilot access key>'
+node examples/nft-mint-buyer.mjs examples/nft-mint-order.json
+```
+
+The client validates the exact 1-USDT X Layer challenge, requires a human-readable confirmation
+before signing, replays the identical body, and stores the order capability token only in a local
+private output file.
 
 During the controlled pilot, set `POCKET_CONCIERGE_NFT_PILOT_KEY` to a separate secret of at least
 32 characters. Callers must send it as `X-Pocket-Pilot-Key` before Pocket returns an x402 challenge.
@@ -169,9 +188,9 @@ caps, and returns a 30-second plan. `minted` verifies that the onchain transacti
 plan and extracts the token ID from the collection's `Transfer` event. `delivered` verifies the exact
 treasury-to-recipient token transfer.
 
-The checked-in service does not contain or accept a raw treasury private key. Enabling this feature
-requires a hardened signer worker. Until that signer, automated refunds, a fork test, and one controlled
-low-value live mint pass, the endpoint must not be listed or advertised as live.
+The checked-in service does not contain or accept a raw treasury private key. The controlled mainnet
+pilot has completed payment, funding, mint, delivery, and refund. Public order creation remains gated
+while failed-mint cancellation, unattended execution leases, and incident recovery are hardened.
 
 ## Railway deployment
 
@@ -198,6 +217,8 @@ POCKET_CONCIERGE_NFT_OPERATOR_KEY=<separate-at-least-32-random-characters>
 POCKET_CONCIERGE_NFT_PILOT_KEY=<separate-at-least-32-random-characters>
 POCKET_CONCIERGE_NFT_WORKER_MAX_FEE_PER_GAS_WEI=<operator-approved Ethereum fee ceiling>
 POCKET_CONCIERGE_NFT_MAX_ORDER_WEI=100000000000000000
+POCKET_CONCIERGE_NFT_DEMO_EXTERNAL_ID=<fully-verified pilot external ID>
+POCKET_CONCIERGE_NFT_DEMO_SERVICE_PAYMENT_TX=<verified X Layer service-payment transaction>
 ```
 
 The agent secret must be generated in Railway or another secret manager. Never commit it or the local binding key.
@@ -219,9 +240,10 @@ $env:POCKET_CONCIERGE_NFT_WORKER_MAX_FEE_PER_GAS_WEI='<wei ceiling>'
 npm run nft:worker -- mint <externalId>
 ```
 
-After reviewing the JSON summary, add `--execute`. The worker requires the exact plan ID twice: once
-before asking OKX Agentic Wallet to prepare the call, and again after OKX returns its own confirmation
-message. Only that second confirmation permits the required `--force` replay.
+After reviewing the JSON summary, add `--execute`. Mint and delivery require the exact plan ID before
+wallet preparation and again before the forced replay. Refunds use OKX Agentic Wallet's dedicated
+native-transfer command instead of the generic contract-call path; the worker requires the plan ID
+and a second exact confirmation before invoking that broadcast-only command.
 
 Use `deliver` for the verified ERC-721 transfer and `refund` for the exact unused-ETH refund:
 
@@ -230,9 +252,17 @@ npm run nft:worker -- deliver <externalId> --execute
 npm run nft:worker -- refund <externalId> --execute
 ```
 
+Every successful broadcast is submitted back to Pocket for receipt verification. If the network
+disconnects after broadcast, recover from the known transaction hash without sending again:
+
+```powershell
+npm run nft:worker -- refund <externalId> --transaction-hash 0x...
+```
+
 OKX Agentic Wallet's contract-call interface does not accept a caller-selected transaction nonce or
-maximum fee per gas. This worker therefore remains an assisted pilot, not an unattended FCFS sniper.
-The server still verifies every resulting Ethereum transaction before advancing the order.
+maximum fee per gas. Mint and delivery therefore remain assisted rather than unattended FCFS
+execution. Refunds use the exact native-transfer path, and the server still verifies every resulting
+Ethereum transaction before advancing the order.
 
 Run the read-only mainnet preflight before any funded test:
 

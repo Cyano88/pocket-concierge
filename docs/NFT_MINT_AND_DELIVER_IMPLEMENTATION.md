@@ -1,6 +1,7 @@
 # Pocket NFT Mint & Deliver
 
-Status: core order, funding, execution-plan, delivery-proof, and unused-ETH refund state machine implemented behind a disabled production flag.
+Status: controlled Ethereum mainnet pilot completed end to end; public order creation remains gated
+while failure recovery and unattended execution controls are hardened.
 
 ## Customer promise
 
@@ -89,11 +90,12 @@ treasury-to-recipient event.
 
 After delivery, Pocket calculates the unused ETH from:
 
-`deposit - mint value - actual mint gas - actual delivery gas - reserved refund gas`
+`deposit - mint value - actual mint gas - actual delivery gas - refund gas reserve - wallet headroom`
 
 The refund transaction must be a plain native-ETH transfer from the treasury to the immutable refund
-address for the exact planned amount. The order is final only after the refund receipt reaches the
-required confirmation count.
+address for the exact planned amount. The assisted worker uses OKX's dedicated native-transfer path
+and never probes it with a test transaction. The order is final only after the refund receipt reaches
+the required confirmation count.
 
 ## Implemented protections
 
@@ -116,13 +118,14 @@ These gates remain mandatory:
 2. Add failed-mint and pre-mint cancellation refund paths, including exact failed-transaction gas.
 3. Add an automatic scheduler with a transactional execution lease so two workers cannot mint twice.
 4. Verify recipient contract compatibility before using `safeTransferFrom`.
-5. Run direct SeaDrop RPC mocks, an Ethereum mainnet fork, and a controlled low-value live mint.
+5. Add an Ethereum mainnet fork suite; the controlled low-value live mint, delivery, and refund have passed.
 6. Independently reproduce the 1-USDT payment challenge and paid replay with OKX buyer tooling.
 7. Run incident tests for RPC disagreement, public-stage changes, replacement transactions, reorgs, gas
    spikes, sold-out stages, stuck delivery, and stuck refunds.
 8. Replace single-instance SQLite before horizontal scaling.
 
-Until all eight gates pass, keep `POCKET_CONCIERGE_NFT_MINT_ENABLED=false` and do not list the service.
+Until the remaining gates pass, keep public order creation behind the pilot key. The completed
+privacy-safe proof may be published and reviewed independently.
 
 ## Assisted OKX worker
 
@@ -130,12 +133,14 @@ Until all eight gates pass, keep `POCKET_CONCIERGE_NFT_MINT_ENABLED=false` and d
 placing a raw key in the API or Railway. It validates the short-lived server plan and runs the OKX
 transaction security scan. The command is dry-run by default.
 
-Adding `--execute` still requires two interactive confirmations. The second confirmation occurs only
-after the initial OKX contract-call returns its confirmation response; only then is the exact command
-replayed with `--force`.
+Adding `--execute` requires two interactive confirmations. Mint and delivery use the guarded
+contract-call preparation and replay. Refund requires both confirmations before the dedicated
+native-transfer command is invoked because that command may broadcast immediately.
 
 The worker intentionally fails closed on scan errors, blocked scans, unknown scan actions, address or
-chain drift, calldata/value/gas mismatches, expired plans, and configured fee-ceiling violations.
+chain drift, calldata/value/gas mismatches, expired plans, and configured fee-ceiling violations. It
+records successful broadcasts automatically and supports transaction-hash-only recovery so a network
+failure cannot justify sending a second transaction.
 Because the current OKX contract-call interface does not expose transaction nonce or a caller-selected
 maximum fee per gas, this is suitable only for an assisted pilot. It does not satisfy the hardened
 unattended-signer gate.

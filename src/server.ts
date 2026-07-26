@@ -17,6 +17,7 @@ import { EthereumNftChainGateway } from './nft-chain.js'
 import {
   NFT_MINT_ORDER_OUTPUT_SCHEMA,
   NFT_MINT_ORDER_ROUTE,
+  NFT_MINT_PUBLIC_PROOF_ROUTE,
   NFT_MINT_SERVICE_FEE_ATOMIC,
   NftMintService,
 } from './nft-mints.js'
@@ -93,6 +94,10 @@ const nftTreasuryRaw = String(process.env.POCKET_CONCIERGE_NFT_TREASURY_ADDRESS 
 const nftOrderTokenSecret = String(process.env.POCKET_CONCIERGE_NFT_ORDER_TOKEN_SECRET || '').trim()
 const nftOperatorKey = String(process.env.POCKET_CONCIERGE_NFT_OPERATOR_KEY || '').trim()
 const nftPilotKey = String(process.env.POCKET_CONCIERGE_NFT_PILOT_KEY || '').trim()
+const nftDemoExternalId = String(process.env.POCKET_CONCIERGE_NFT_DEMO_EXTERNAL_ID || '').trim()
+const nftDemoServicePaymentTx = String(
+  process.env.POCKET_CONCIERGE_NFT_DEMO_SERVICE_PAYMENT_TX || '',
+).trim()
 if (nftPilotKey && nftPilotKey.length < 32) {
   throw new ConciergeError(
     'NFT_CONFIG_INVALID',
@@ -299,6 +304,19 @@ const server = createServer(async (req, res) => {
         },
       }, payment.headers)
     }
+    if (method === 'GET' && url.pathname === NFT_MINT_PUBLIC_PROOF_ROUTE) {
+      if (!nftService || !nftDemoExternalId || !nftDemoServicePaymentTx) {
+        throw new ConciergeError('NFT_PROOF_NOT_CONFIGURED', 'The verified NFT pilot proof is not configured.', 503)
+      }
+      return json(res, 200, {
+        ok: true,
+        proof: await nftService.publicProof(
+          'okx-marketplace',
+          nftDemoExternalId,
+          nftDemoServicePaymentTx,
+        ),
+      })
+    }
     const receiptMatch = url.pathname.match(/^\/v1\/authority\/receipts\/(pr_[a-f0-9]{32})$/)
     if (method === 'GET' && receiptMatch?.[1]) {
       return json(res, 200, { ok: true, receipt: await service.getReceipt(receiptMatch[1]) })
@@ -352,6 +370,9 @@ const server = createServer(async (req, res) => {
           enabled: nftConfigComplete,
           access: nftConfigComplete ? (nftPilotKey ? 'private-pilot' : 'public') : 'disabled',
           paidEntrypoint: NFT_MINT_ORDER_ROUTE,
+          verifiedPilotProof: nftDemoExternalId && nftDemoServicePaymentTx
+            ? NFT_MINT_PUBLIC_PROOF_ROUTE
+            : null,
           supported: ['ethereum-mainnet', 'opensea-seadrop', 'public-fcfs', 'quantity-1'],
         },
         idempotency: 'externalId + cycleId',

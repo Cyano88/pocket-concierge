@@ -25,6 +25,7 @@ test('OpenAPI publishes every implemented route and no Prava action', async () =
   assert.ok(document.paths?.['/v1/authority/receipts/{receiptId}']?.get)
   assert.ok(document.paths?.['/v1/okx/authority-proof']?.get)
   assert.ok(document.paths?.['/v1/okx/nft-mints/orders']?.post)
+  assert.ok(document.paths?.['/v1/public/nft-pilot']?.get)
   assert.ok(document.paths?.['/v1/nft-mints/orders/{externalId}']?.get)
   assert.ok(document.paths?.['/v1/nft-mints/orders/{externalId}/funding']?.post)
   assert.ok(document.paths?.['/v1/nft-mints/orders/{externalId}/prepare']?.post)
@@ -46,6 +47,14 @@ test('copy-paste errand example maps to one valid mission cycle', async () => {
 
 test('copy-paste errand client is valid JavaScript', () => {
   const result = spawnSync(process.execPath, ['--check', 'examples/errand-quickstart.mjs'], {
+    cwd: process.cwd(),
+    encoding: 'utf8',
+  })
+  assert.equal(result.status, 0, result.stderr)
+})
+
+test('copy-paste NFT buyer is valid JavaScript', () => {
+  const result = spawnSync(process.execPath, ['--check', 'examples/nft-mint-buyer.mjs'], {
     cwd: process.cwd(),
     encoding: 'utf8',
   })

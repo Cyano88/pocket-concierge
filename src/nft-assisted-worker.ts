@@ -39,6 +39,43 @@ export type AssistedPlanConstraints = {
   now?: number
 }
 
+export function assistedWalletArguments(plan: ValidatedAssistedPlan) {
+  if (plan.action === 'refund') {
+    return [
+      'wallet',
+      'send',
+      '--chain',
+      'ethereum',
+      '--from',
+      plan.transaction.from,
+      '--recipient',
+      plan.transaction.to,
+      '--amt',
+      plan.transaction.valueWei,
+    ]
+  }
+  return [
+    'wallet',
+    'contract-call',
+    '--chain',
+    'ethereum',
+    '--from',
+    plan.transaction.from,
+    '--to',
+    plan.transaction.to,
+    '--amt',
+    plan.transaction.valueWei,
+    '--input-data',
+    plan.transaction.data,
+    '--gas-limit',
+    plan.transaction.gasLimit,
+    '--biz-type',
+    'dapp',
+    '--strategy',
+    'pocket-nft-assisted-worker',
+  ]
+}
+
 function fail(message: string): never {
   throw new ConciergeError('NFT_WORKER_PLAN_INVALID', message, 409)
 }

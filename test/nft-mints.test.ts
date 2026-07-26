@@ -546,6 +546,13 @@ test('records only a mint matching the immutable plan and exact NFT delivery', a
   )
   assert.equal(refunded.state, 'refunded')
   assert.equal(refunded.refund?.amountWei, '16592800000000000')
+  const proof = await app.publicProof('agent-one', 'opensea-drop-0001', DEPOSIT_HASH)
+  assert.equal(proof.status, 'verified_complete')
+  assert.equal(proof.purchase.tokenId, '77')
+  assert.equal(proof.settlement.refund.transactionHash, REFUND_HASH)
+  assert.match(proof.proofId, /^nfp_[a-f0-9]{24}$/)
+  assert.match(proof.proofHash, /^[a-f0-9]{64}$/)
+  assert.equal(JSON.stringify(proof).includes('agent-one'), false)
 })
 
 test('refund can be replanned only after an unbroadcast plan expires', async () => {

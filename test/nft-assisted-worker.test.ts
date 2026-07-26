@@ -2,7 +2,11 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 import { encodeFunctionData, getAddress, keccak256 } from 'viem'
 import { SEADROP_1_0 } from '../src/nft-chain.js'
-import { validateAssistedNftPlan, type AssistedNftAction } from '../src/nft-assisted-worker.js'
+import {
+  assistedWalletArguments,
+  validateAssistedNftPlan,
+  type AssistedNftAction,
+} from '../src/nft-assisted-worker.js'
 
 const NOW = Date.parse('2026-07-26T12:00:00.000Z')
 const TREASURY = getAddress('0x1111111111111111111111111111111111111111')
@@ -129,4 +133,15 @@ test('assisted worker rejects delivery value and inexact refund transfers', () =
   refund.execution.transaction.data = '0x00'
   fixturePlan(refund, 'refundPlan').calldataHash = keccak256('0x00')
   assert.throws(() => validate(refund, 'refund'))
+})
+
+test('refund uses one dedicated native transfer and never the generic contract-call path', () => {
+  const plan = validate(response('refund'), 'refund')
+  const args = assistedWalletArguments(plan)
+  assert.deepEqual(args.slice(0, 4), ['wallet', 'send', '--chain', 'ethereum'])
+  assert.equal(args.includes('contract-call'), false)
+  assert.equal(args.includes('--input-data'), false)
+  assert.equal(args.includes('--force'), false)
+  assert.equal(args[args.indexOf('--recipient') + 1], REFUND)
+  assert.equal(args[args.indexOf('--amt') + 1], plan.transaction.valueWei)
 })

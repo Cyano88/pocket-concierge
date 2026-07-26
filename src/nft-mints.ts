@@ -15,6 +15,7 @@ const ASSISTED_REFUND_BALANCE_HEADROOM_PERCENT = 20n
 
 export const NFT_MINT_SERVICE_FEE_ATOMIC = '1000000'
 export const NFT_MINT_ORDER_ROUTE = '/v1/okx/nft-mints/orders'
+export const NFT_MINT_PUBLIC_PROOF_ROUTE = '/v1/public/nft-pilot'
 export const NFT_MINT_ORDER_OUTPUT_SCHEMA = {
   input: {
     type: 'http',
@@ -201,6 +202,90 @@ export class NftMintService {
 
   async get(ownerId: string, externalId: string) {
     return publicOrder(await this.requireOrder(ownerId, externalId))
+  }
+
+  async publicProof(ownerId: string, externalId: string, servicePaymentTransactionHash: string) {
+    if (!TX_HASH.test(servicePaymentTransactionHash)) {
+      throw new ConciergeError('NFT_PROOF_NOT_CONFIGURED', 'The NFT service-payment proof is not configured.', 503)
+    }
+    const order = await this.requireOrder(ownerId, externalId)
+    if (
+      order.state !== 'refunded'
+      || !order.deposit
+      || !order.mint
+      || !order.delivery
+      || !order.refund
+    ) {
+      throw new ConciergeError('NFT_PROOF_NOT_READY', 'The configured NFT pilot is not fully verified.', 503)
+    }
+    const totalExecutionGasWei = (
+      BigInt(order.mint.gasCostWei)
+      + BigInt(order.delivery.gasCostWei)
+      + BigInt(order.refund.gasCostWei)
+    ).toString()
+    const proof = {
+      proofVersion: '1',
+      service: 'Pocket NFT Mint & Deliver',
+      status: 'verified_complete',
+      network: 'ethereum-mainnet',
+      mandate: {
+        manifestHash: order.manifestHash,
+        quantity: order.quantity,
+        maxMintPriceWei: order.maxMintPriceWei,
+        maxTotalCostWei: order.maxTotalCostWei,
+      },
+      purchase: {
+        collection: order.collectionSlug,
+        nftContract: order.nftContract,
+        tokenId: order.mint.tokenId,
+        recipient: order.nftRecipient,
+      },
+      settlement: {
+        servicePayment: {
+          network: 'eip155:196',
+          asset: '0x779ded0c9e1022225f8e0630b35a9b54be713736',
+          amountAtomic: NFT_MINT_SERVICE_FEE_ATOMIC,
+          transactionHash: servicePaymentTransactionHash,
+        },
+        executionFunding: {
+          amountWei: order.deposit.amountWei,
+          transactionHash: order.deposit.transactionHash,
+        },
+        mint: {
+          transactionHash: order.mint.transactionHash,
+          gasCostWei: order.mint.gasCostWei,
+        },
+        delivery: {
+          transactionHash: order.delivery.transactionHash,
+          gasCostWei: order.delivery.gasCostWei,
+        },
+        refund: {
+          transactionHash: order.refund.transactionHash,
+          amountWei: order.refund.amountWei,
+          gasCostWei: order.refund.gasCostWei,
+        },
+        totalExecutionGasWei,
+      },
+      verifiedAt: order.refund.confirmedAt,
+    }
+    const proofHash = digest(proof)
+    return {
+      proofId: `nfp_${proofHash.slice(0, 24)}`,
+      proofHash,
+      ...proof,
+      privacy: {
+        includes: ['public chain addresses', 'transaction hashes', 'amounts', 'NFT contract and token ID'],
+        excludes: ['wallet credentials', 'order access token', 'operator key', 'customer account references'],
+      },
+      explorers: {
+        xLayerServicePayment: `https://www.oklink.com/x-layer/tx/${servicePaymentTransactionHash}`,
+        ethereumFunding: `https://eth.blockscout.com/tx/${order.deposit.transactionHash}`,
+        ethereumMint: `https://eth.blockscout.com/tx/${order.mint.transactionHash}`,
+        ethereumDelivery: `https://eth.blockscout.com/tx/${order.delivery.transactionHash}`,
+        ethereumRefund: `https://eth.blockscout.com/tx/${order.refund.transactionHash}`,
+        nftOwner: `https://eth.blockscout.com/token/${order.nftContract}/instance/${order.mint.tokenId}`,
+      },
+    }
   }
 
   async authenticateOrder(ownerId: string, externalId: string, suppliedToken: string | undefined) {
