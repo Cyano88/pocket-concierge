@@ -148,10 +148,21 @@ It contains the X Layer service payment, Ethereum funding, mint, delivery, refun
 recomputable proof hash, and explorer links. It excludes capability tokens, credentials, operator
 keys, and private customer references.
 
+Before paying or depositing ETH, agents can run the same order body through the free live preview:
+
+```text
+POST https://pocket-concierge-production.up.railway.app/v1/nft-mints/preview
+```
+
+The preview creates no order and accepts no funds. It reads the current SeaDrop stage, verifies the
+official mint call, estimates the bounded mint, delivery, and refund reserve, checks the customer's
+limits, and returns the manifest hash that the paid order will bind.
+
 Create the paid order with `POST /v1/okx/nft-mints/orders` using
 [examples/nft-mint-order.json](./examples/nft-mint-order.json). The signed replay returns an
-`orderAccessToken`, the Ethereum treasury address, and the required maximum deposit. The caller then
-sends ETH from the immutable `fundingAddress` and submits the full Ethereum transaction hash:
+explicit accepted-order deliverable, `orderAccessToken`, authenticated final-proof URL, Ethereum
+treasury address, and required maximum deposit. The caller then sends ETH from the immutable
+`fundingAddress` and submits the full Ethereum transaction hash:
 
 ```powershell
 $env:POCKET_CONCIERGE_NFT_PILOT_KEY='<pilot access key>'

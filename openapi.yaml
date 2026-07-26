@@ -70,6 +70,31 @@ paths:
           description: Recomputable proof with X Layer payment, Ethereum funding, mint, delivery, refund, and explorer links
         "503":
           description: No fully verified public pilot has been configured
+  /v1/nft-mints/preview:
+    post:
+      security: []
+      operationId: previewNftMintOrder
+      summary: Verify a supported SeaDrop public mint and estimate its bounded execution cost for free
+      description: |
+        Reads the live Ethereum public-drop configuration, validates the official
+        SeaDrop call, checks the customer's price and total-cost limits, and returns
+        an immutable manifest hash. It creates no order, accepts no ETH, and charges
+        no service fee.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NftMintOrderInput"
+      responses:
+        "200":
+          description: Supported live public mint, current price, bounded gas estimate, and next action
+        "409":
+          description: Public stage, wallet limit, supply, price, or total-cost mandate is not currently executable
+        "422":
+          description: Collection is not a supported official SeaDrop 1.0 public mint
+        "503":
+          description: Ethereum NFT adapter is not configured
   /v1/okx/nft-mints/orders:
     post:
       security:
@@ -92,9 +117,9 @@ paths:
         "401":
           description: Missing or invalid private-pilot key
         "201":
-          description: Order created; deposit instructions and order access token returned
+          description: Accepted execution-order deliverable, deposit instructions, final-proof URL, and order access token
         "200":
-          description: Idempotent replay of the identical immutable order
+          description: Idempotent replay of the identical accepted execution-order deliverable
         "402":
           description: 1-USDT exact EIP-3009 payment challenge on X Layer
           headers:

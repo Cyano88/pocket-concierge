@@ -178,6 +178,32 @@ function service(
   }
 }
 
+test('previews a supported public mint without creating an order or accepting funds', async () => {
+  const { app, store } = service()
+  const preview = await app.preview(input())
+
+  assert.equal(preview.supported, true)
+  assert.equal(preview.scope.network, 'ethereum-mainnet')
+  assert.equal(preview.scope.mintMechanism, 'official-seadrop-1.0-public-drop')
+  assert.equal(preview.quote.currentMintPriceWei, '10000000000000000')
+  assert.equal(preview.quote.maximumEstimatedTotalWei, '19630000000000000')
+  assert.equal(preview.quote.requiredDepositWei, '30000000000000000')
+  assert.equal(preview.quote.serviceFee.amountAtomic, '1000000')
+  assert.equal(preview.mandate.withinLimits, true)
+  assert.equal((await store.get('agent-one', 'opensea-drop-0001')), null)
+})
+
+test('preview rejects a live total-cost estimate outside the customer mandate', async () => {
+  const { app } = service()
+  await assert.rejects(
+    app.preview(input({
+      maxMintPriceWei: '15000000000000000',
+      maxTotalCostWei: '19000000000000000',
+    })),
+    (error: unknown) => (error as { code?: string }).code === 'NFT_TOTAL_COST_LIMIT',
+  )
+})
+
 test('creates an immutable customer-funded order and replays idempotently', async () => {
   const { app } = service()
   const created = await app.create('agent-one', input())

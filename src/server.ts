@@ -17,6 +17,7 @@ import { EthereumNftChainGateway } from './nft-chain.js'
 import {
   NFT_MINT_ORDER_OUTPUT_SCHEMA,
   NFT_MINT_ORDER_ROUTE,
+  NFT_MINT_PREVIEW_ROUTE,
   NFT_MINT_PUBLIC_PROOF_ROUTE,
   NFT_MINT_SERVICE_FEE_ATOMIC,
   NftMintService,
@@ -275,6 +276,19 @@ const server = createServer(async (req, res) => {
       if (payment.status === 'challenge') return sendResponse(res, payment.response)
       return json(res, 200, evaluatePaidAuthorityCheck(requestBody, Date.now()), payment.headers)
     }
+    if (method === 'POST' && url.pathname === NFT_MINT_PREVIEW_ROUTE) {
+      if (!nftService) {
+        throw new ConciergeError(
+          'NFT_MINT_NOT_CONFIGURED',
+          'Pocket NFT Mint & Deliver is disabled until its Ethereum gateway and signer operator are configured.',
+          503,
+        )
+      }
+      return json(res, 200, {
+        ok: true,
+        preview: await nftService.preview(await body(req)),
+      })
+    }
     if (method === 'POST' && url.pathname === NFT_MINT_ORDER_ROUTE) {
       if (!nftService || !nftOrderProtector) {
         throw new ConciergeError(
@@ -292,15 +306,29 @@ const server = createServer(async (req, res) => {
       }), requestBody)
       if (payment.status === 'challenge') return sendResponse(res, payment.response)
       const created = await nftService.create('okx-marketplace', requestBody)
+      const statusPath = `/v1/nft-mints/orders/${encodeURIComponent(created.order.externalId)}`
       return json(res, created.replayed ? 200 : 201, {
         ok: true,
         ...created,
+        deliverable: {
+          type: 'bounded_nft_mint_execution_order',
+          status: 'accepted',
+          orderId: created.order.orderId,
+          manifestHash: created.order.manifestHash,
+          state: created.order.state,
+          servicePayment: 'settled',
+          executionFunding: 'awaiting_customer_deposit',
+          finalProof: `${publicUrl}${statusPath}`,
+        },
         next: {
           action: 'deposit_ethereum',
           chainId: 1,
           amountWei: created.order.requiredDepositWei,
           to: created.order.treasuryAddress,
           then: `POST /v1/nft-mints/orders/${encodeURIComponent(created.order.externalId)}/funding`,
+          status: statusPath,
+          orderTokenHeader: 'X-Order-Token',
+          warning: 'Send only the exact order amount from the immutable fundingAddress. Never share a wallet key.',
         },
       }, payment.headers)
     }
@@ -369,6 +397,7 @@ const server = createServer(async (req, res) => {
         nftMint: {
           enabled: nftConfigComplete,
           access: nftConfigComplete ? (nftPilotKey ? 'private-pilot' : 'public') : 'disabled',
+          preview: NFT_MINT_PREVIEW_ROUTE,
           paidEntrypoint: NFT_MINT_ORDER_ROUTE,
           verifiedPilotProof: nftDemoExternalId && nftDemoServicePaymentTx
             ? NFT_MINT_PUBLIC_PROOF_ROUTE

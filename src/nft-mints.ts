@@ -15,6 +15,7 @@ const ASSISTED_REFUND_BALANCE_HEADROOM_PERCENT = 20n
 
 export const NFT_MINT_SERVICE_FEE_ATOMIC = '1000000'
 export const NFT_MINT_ORDER_ROUTE = '/v1/okx/nft-mints/orders'
+export const NFT_MINT_PREVIEW_ROUTE = '/v1/nft-mints/preview'
 export const NFT_MINT_PUBLIC_PROOF_ROUTE = '/v1/public/nft-pilot'
 export const NFT_MINT_ORDER_OUTPUT_SCHEMA = {
   input: {
@@ -49,6 +50,12 @@ export const NFT_MINT_ORDER_OUTPUT_SCHEMA = {
         expiresAt: { type: 'string', format: 'date-time' },
       },
     },
+  },
+  output: {
+    deliverable: 'accepted bounded NFT mint execution order',
+    orderAccessToken: 'secret capability used to read the order and confirm funding',
+    next: 'exact Ethereum funding instruction',
+    finalProof: 'authenticated status URL that accumulates mint, delivery, and refund evidence',
   },
 } as const
 
@@ -139,6 +146,80 @@ function publicOrder(order: NftMintOrder) {
 
 export class NftMintService {
   constructor(private readonly dependencies: NftMintDependencies) {}
+
+  async preview(raw: unknown) {
+    const input = validateInput(raw, this.dependencies.now())
+    this.assertOrderLimit(input)
+    const transaction = await this.dependencies.chain.buildMint(
+      input.collectionSlug,
+      input.nftContract,
+      this.dependencies.treasuryAddress,
+    )
+    this.dependencies.chain.validateMint(
+      transaction,
+      input.nftContract,
+      this.dependencies.treasuryAddress,
+    )
+    const mintPriceWei = BigInt(transaction.valueWei)
+    if (mintPriceWei > BigInt(input.maxMintPriceWei)) {
+      throw new ConciergeError('NFT_MINT_PRICE_LIMIT', 'Current mint price exceeds the customer mandate.', 409)
+    }
+    const [estimatedMintGas, maxFeePerGas] = await Promise.all([
+      this.dependencies.chain.estimateMintGas(transaction, this.dependencies.treasuryAddress),
+      this.dependencies.chain.maxFeePerGas(),
+    ])
+    const mintGasLimit = estimatedMintGas * 120n / 100n
+    const maximumEstimatedTotalWei = mintPriceWei + maxFeePerGas * (
+      mintGasLimit + this.dependencies.deliveryGasLimit + this.dependencies.refundGasLimit
+    )
+    if (maximumEstimatedTotalWei > BigInt(input.maxTotalCostWei)) {
+      throw new ConciergeError(
+        'NFT_TOTAL_COST_LIMIT',
+        'Current mint, delivery, and refund reserve exceed the customer spending cap.',
+        409,
+      )
+    }
+    const manifest = {
+      ...input,
+      chainId: 1,
+      treasuryAddress: this.dependencies.treasuryAddress,
+      requiredDepositWei: input.maxTotalCostWei,
+    }
+    return {
+      supported: true,
+      checkedAt: new Date(this.dependencies.now()).toISOString(),
+      scope: {
+        network: 'ethereum-mainnet',
+        mintMechanism: 'official-seadrop-1.0-public-drop',
+        quantity: 1,
+      },
+      quote: {
+        currentMintPriceWei: mintPriceWei.toString(),
+        maxFeePerGasWei: maxFeePerGas.toString(),
+        mintGasLimit: mintGasLimit.toString(),
+        deliveryGasReserve: this.dependencies.deliveryGasLimit.toString(),
+        refundGasReserve: this.dependencies.refundGasLimit.toString(),
+        maximumEstimatedTotalWei: maximumEstimatedTotalWei.toString(),
+        requiredDepositWei: input.maxTotalCostWei,
+        serviceFee: {
+          network: 'eip155:196',
+          asset: '0x779ded0c9e1022225f8e0630b35a9b54be713736',
+          amountAtomic: NFT_MINT_SERVICE_FEE_ATOMIC,
+          display: '1 USDT',
+        },
+      },
+      mandate: {
+        manifestHash: digest(manifest),
+        expiresAt: input.expiresAt,
+        withinLimits: true,
+      },
+      next: {
+        action: 'create_paid_order',
+        endpoint: NFT_MINT_ORDER_ROUTE,
+        warning: 'Do not deposit ETH until the paid replay returns the exact treasury and order capability.',
+      },
+    }
+  }
 
   async assertCreatable(ownerId: string, raw: unknown) {
     const input = validateInput(raw, this.dependencies.now())

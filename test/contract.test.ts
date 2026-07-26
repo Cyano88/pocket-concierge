@@ -25,6 +25,7 @@ test('OpenAPI publishes every implemented route and no Prava action', async () =
   assert.ok(document.paths?.['/v1/authority/receipts/{receiptId}']?.get)
   assert.ok(document.paths?.['/v1/okx/authority-proof']?.get)
   assert.ok(document.paths?.['/v1/okx/nft-mints/orders']?.post)
+  assert.ok(document.paths?.['/v1/nft-mints/preview']?.post)
   assert.ok(document.paths?.['/v1/public/nft-pilot']?.get)
   assert.ok(document.paths?.['/v1/nft-mints/orders/{externalId}']?.get)
   assert.ok(document.paths?.['/v1/nft-mints/orders/{externalId}/funding']?.post)
