@@ -1,5 +1,4 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
-import { timingSafeEqual } from 'node:crypto'
 import { getAddress, isAddress } from 'viem'
 import { authenticate, parseAgentKeys } from './auth.js'
 import {
@@ -22,6 +21,7 @@ import {
   NftMintService,
 } from './nft-mints.js'
 import { MemoryNftMintStore, SqliteNftMintStore } from './nft-store.js'
+import { requireSecret } from './secret-gate.js'
 
 const PORT = Number(process.env.PORT || 4310)
 const keys = parseAgentKeys(process.env.POCKET_CONCIERGE_AGENT_KEYS)
@@ -92,6 +92,21 @@ const nftRpcUrl = String(process.env.ETHEREUM_RPC_URL || '').trim()
 const nftTreasuryRaw = String(process.env.POCKET_CONCIERGE_NFT_TREASURY_ADDRESS || '').trim()
 const nftOrderTokenSecret = String(process.env.POCKET_CONCIERGE_NFT_ORDER_TOKEN_SECRET || '').trim()
 const nftOperatorKey = String(process.env.POCKET_CONCIERGE_NFT_OPERATOR_KEY || '').trim()
+const nftPilotKey = String(process.env.POCKET_CONCIERGE_NFT_PILOT_KEY || '').trim()
+if (nftPilotKey && nftPilotKey.length < 32) {
+  throw new ConciergeError(
+    'NFT_CONFIG_INVALID',
+    'POCKET_CONCIERGE_NFT_PILOT_KEY must contain at least 32 characters.',
+    500,
+  )
+}
+if (nftPilotKey && (nftPilotKey === nftOperatorKey || nftPilotKey === nftOrderTokenSecret)) {
+  throw new ConciergeError(
+    'NFT_CONFIG_INVALID',
+    'The NFT pilot key must be distinct from the operator and order-token secrets.',
+    500,
+  )
+}
 const nftConfigComplete = Boolean(
   nftEnabled
   && paidRouteConfig
@@ -207,11 +222,22 @@ function bearer(value: string | undefined) {
 }
 
 function requireNftOperator(value: string | undefined) {
-  const supplied = Buffer.from(String(value ?? ''))
-  const expected = Buffer.from(nftOperatorKey)
-  if (!expected.length || supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) {
-    throw new ConciergeError('NFT_OPERATOR_UNAUTHORIZED', 'A valid NFT execution-operator key is required.', 401)
-  }
+  requireSecret(
+    value,
+    nftOperatorKey,
+    'NFT_OPERATOR_UNAUTHORIZED',
+    'A valid NFT execution-operator key is required.',
+  )
+}
+
+function requireNftPilot(value: string | undefined) {
+  if (!nftPilotKey) return
+  requireSecret(
+    value,
+    nftPilotKey,
+    'NFT_PILOT_UNAUTHORIZED',
+    'A valid Pocket NFT pilot key is required before payment.',
+  )
 }
 
 const server = createServer(async (req, res) => {
@@ -252,6 +278,7 @@ const server = createServer(async (req, res) => {
           503,
         )
       }
+      requireNftPilot(req.headers['x-pocket-pilot-key'] as string | undefined)
       const requestBody = await body(req)
       await nftService.assertCreatable('okx-marketplace', requestBody)
       const payment = await nftOrderProtector.protect(new Request(`${publicUrl}${url.pathname}${url.search}`, {
@@ -302,6 +329,7 @@ const server = createServer(async (req, res) => {
         },
         nftMint: {
           status: nftConfigComplete ? 'pilot-enabled' : 'disabled-until-signer-and-chain-configured',
+          access: nftConfigComplete ? (nftPilotKey ? 'private-pilot' : 'public') : 'disabled',
           serviceFee: '1 USDT on X Layer',
           executionCapital: 'Customer deposits native ETH on Ethereum before the order is armed.',
           custody: 'Pocket temporarily holds execution ETH and the minted NFT until delivery.',
@@ -322,6 +350,7 @@ const server = createServer(async (req, res) => {
         unavailableUntilAdapterVerification: ['airtime', 'paid_brief', 'shopping'],
         nftMint: {
           enabled: nftConfigComplete,
+          access: nftConfigComplete ? (nftPilotKey ? 'private-pilot' : 'public') : 'disabled',
           paidEntrypoint: NFT_MINT_ORDER_ROUTE,
           supported: ['ethereum-mainnet', 'opensea-seadrop', 'public-fcfs', 'quantity-1'],
         },

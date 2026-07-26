@@ -55,14 +55,16 @@ paths:
           description: Verified, supported, and unavailable errand adapters
   /v1/okx/nft-mints/orders:
     post:
-      security: []
+      security:
+        - pilotKey: []
       operationId: createPaidNftMintOrder
       summary: Pay 1 USDT to create one bounded, customer-funded Ethereum mint-and-deliver order
       description: |
         The 1-USDT X Layer payment is Pocket's service fee. It is separate from the
         native ETH execution capital. The paid replay returns the immutable order,
         a secret order access token, the Ethereum treasury address, and the exact
-        maximum ETH deposit required before the order can become armed.
+        maximum ETH deposit required before the order can become armed. During the
+        controlled pilot, X-Pocket-Pilot-Key is required before any x402 challenge.
       requestBody:
         required: true
         content:
@@ -70,6 +72,8 @@ paths:
             schema:
               $ref: "#/components/schemas/NftMintOrderInput"
       responses:
+        "401":
+          description: Missing or invalid private-pilot key
         "201":
           description: Order created; deposit instructions and order access token returned
         "200":
@@ -426,6 +430,10 @@ components:
       type: apiKey
       in: header
       name: X-Operator-Key
+    pilotKey:
+      type: apiKey
+      in: header
+      name: X-Pocket-Pilot-Key
   parameters:
     ExternalId:
       name: externalId

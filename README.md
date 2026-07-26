@@ -143,6 +143,11 @@ Create the paid order with `POST /v1/okx/nft-mints/orders` using
 `orderAccessToken`, the Ethereum treasury address, and the required maximum deposit. The caller then
 sends ETH from the immutable `fundingAddress` and submits the full Ethereum transaction hash:
 
+During the controlled pilot, set `POCKET_CONCIERGE_NFT_PILOT_KEY` to a separate secret of at least
+32 characters. Callers must send it as `X-Pocket-Pilot-Key` before Pocket returns an x402 challenge.
+Remove the environment variable only after the mint, delivery, and refund demonstrations pass and the
+service is ready for public orders.
+
 ```http
 POST /v1/nft-mints/orders/{externalId}/funding
 X-Order-Token: nmt_...
@@ -190,6 +195,7 @@ ETHEREUM_RPC_URL=<private Ethereum mainnet RPC>
 POCKET_CONCIERGE_NFT_TREASURY_ADDRESS=<Ethereum execution treasury>
 POCKET_CONCIERGE_NFT_ORDER_TOKEN_SECRET=<at-least-32-random-characters>
 POCKET_CONCIERGE_NFT_OPERATOR_KEY=<separate-at-least-32-random-characters>
+POCKET_CONCIERGE_NFT_PILOT_KEY=<separate-at-least-32-random-characters>
 POCKET_CONCIERGE_NFT_WORKER_MAX_FEE_PER_GAS_WEI=<operator-approved Ethereum fee ceiling>
 POCKET_CONCIERGE_NFT_MAX_ORDER_WEI=100000000000000000
 ```
