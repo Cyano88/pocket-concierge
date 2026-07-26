@@ -71,6 +71,8 @@ const deliveryCalldata = encodeFunctionData({
 })
 
 class FakeChain implements NftChainGateway {
+  feePerGas = 30_000_000_000n
+
   transaction: BuiltMintTransaction = {
     target: SEADROP_1_0,
     calldata: mintCalldata,
@@ -127,7 +129,7 @@ class FakeChain implements NftChainGateway {
     assert.equal(treasuryAddress, TREASURY)
   }
   async estimateMintGas() { return 150_000n }
-  async maxFeePerGas() { return 30_000_000_000n }
+  async maxFeePerGas() { return this.feePerGas }
   async verifyDeposit() { return structuredClone(this.deposit) }
   async verifyMint() { return structuredClone(this.mint) }
   async prepareDelivery() {
@@ -538,6 +540,22 @@ test('refund can be replanned only after an unbroadcast plan expires', async () 
   const replacement = await app.prepareRefund('agent-one', 'opensea-drop-0001')
   assert.notEqual(replacement.order.refundPlan?.planId, first.order.refundPlan?.planId)
   assert.equal(replacement.order.state, 'refunding')
+})
+
+test('refund reserves the assisted-wallet fee floor when RPC fees are unrealistically low', async () => {
+  const chain = new FakeChain()
+  chain.feePerGas = 70_000_000n
+  const { app } = service(new MemoryNftMintStore(), chain)
+  await app.create('agent-one', input())
+  await app.confirmFunding('agent-one', 'opensea-drop-0001', { depositTransactionHash: DEPOSIT_HASH })
+  await app.prepareExecution('agent-one', 'opensea-drop-0001')
+  await app.recordMint('agent-one', 'opensea-drop-0001', { mintTransactionHash: MINT_HASH })
+  await app.prepareDelivery('agent-one', 'opensea-drop-0001')
+  await app.recordDelivery('agent-one', 'opensea-drop-0001', { deliveryTransactionHash: DELIVERY_HASH })
+
+  const refundPlan = await app.prepareRefund('agent-one', 'opensea-drop-0001')
+  assert.equal(refundPlan.transaction.maxFeePerGasWei, '1500000000')
+  assert.equal(refundPlan.transaction.valueWei, '17468500000000000')
 })
 
 test('SQLite persistence preserves orders and globally unique deposit claims', async () => {

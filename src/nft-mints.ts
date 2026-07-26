@@ -10,6 +10,7 @@ const COLLECTION_SLUG = /^[a-z0-9][a-z0-9-]{1,99}$/
 const TX_HASH = /^0x[0-9a-fA-F]{64}$/
 const UINT = /^(0|[1-9][0-9]*)$/
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
+const MIN_ASSISTED_REFUND_MAX_FEE_PER_GAS_WEI = 1_500_000_000n
 
 export const NFT_MINT_SERVICE_FEE_ATOMIC = '1000000'
 export const NFT_MINT_ORDER_ROUTE = '/v1/okx/nft-mints/orders'
@@ -474,7 +475,10 @@ export class NftMintService {
       throw new ConciergeError('NFT_ORDER_STATE_INVALID', 'A delivered order with verified costs is required before refund preparation.', 409)
     }
     const maxFeePerGas = await this.dependencies.chain.maxFeePerGas()
-    const bufferedMaxFeePerGas = (maxFeePerGas * 120n + 99n) / 100n
+    const percentageBufferedFee = (maxFeePerGas * 120n + 99n) / 100n
+    const bufferedMaxFeePerGas = percentageBufferedFee > MIN_ASSISTED_REFUND_MAX_FEE_PER_GAS_WEI
+      ? percentageBufferedFee
+      : MIN_ASSISTED_REFUND_MAX_FEE_PER_GAS_WEI
     const spentBeforeRefund = BigInt(order.executionPlan?.valueWei ?? '0')
       + BigInt(order.mint.gasCostWei)
       + BigInt(order.delivery.gasCostWei)
