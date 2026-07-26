@@ -13,11 +13,13 @@
     "nft:preflight": "tsx scripts/nft-mainnet-preflight.ts",
     "nft:direct-smoke": "tsx scripts/nft-direct-smoke.ts",
     "nft:worker": "tsx scripts/nft-assisted-worker.ts",
+    "nft:kms-worker": "tsx scripts/nft-kms-worker.ts",
     "test": "node --import tsx --test test/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build": "tsc -p tsconfig.json"
   },
   "dependencies": {
+    "@aws-sdk/client-kms": "^3.1095.0",
     "@okxweb3/x402-core": "^0.1.0",
     "@okxweb3/x402-evm": "^0.2.1",
     "tsx": "^4.23.0",

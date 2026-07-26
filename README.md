@@ -201,11 +201,14 @@ treasury-to-recipient token transfer.
 
 The checked-in service does not contain or accept a raw treasury private key. The controlled mainnet
 pilot has completed payment, funding, mint, delivery, and refund. Public order creation remains gated
-while the final unattended HSM/MPC signer adapter is selected and verified. The API now atomically
+while the unattended signer is provisioned and verified. The included AWS KMS adapter uses a
+non-exportable `ECC_SECG_P256K1` key, serializes the exact nonce-bound transaction, recovers the KMS
+address before broadcasting, and keeps its one-use authorization ledger outside the API. The API now atomically
 claims one treasury transaction lease at a time, reserves and verifies the Ethereum nonce for mint,
 delivery, and refund, supports unfunded cancellation, and deducts independently verified failed-mint
-gas before preparing an immutable refund. The isolated signer guard maintains a second one-use nonce
-ledger and refuses duplicate plans before calling a future HSM/MPC broadcast backend.
+gas before preparing an immutable refund. See
+[`docs/NFT_AWS_KMS_SIGNER.md`](./docs/NFT_AWS_KMS_SIGNER.md) for the isolated deployment and
+least-privilege IAM contract.
 
 ## Railway deployment
 
@@ -238,6 +241,8 @@ POCKET_CONCIERGE_NFT_DEMO_SERVICE_PAYMENT_TX=<verified X Layer service-payment t
 ```
 
 The agent secret must be generated in Railway or another secret manager. Never commit it or the local binding key.
+The KMS key ID, signer ledger and AWS identity belong only in the isolated worker, not this Railway
+API service.
 
 ### Assisted OKX execution worker
 
