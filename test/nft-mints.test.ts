@@ -116,7 +116,7 @@ class FakeChain implements NftChainGateway {
     transactionHash: REFUND_HASH,
     from: TREASURY,
     to: REFUND,
-    valueWei: '16744000000000000',
+    valueWei: '16592800000000000',
     blockNumber: 103n,
     gasCostWei: 600_000_000_000_000n,
     confirmations: 2,
@@ -508,7 +508,7 @@ test('records only a mint matching the immutable plan and exact NFT delivery', a
   const refundPlan = await app.prepareRefund('agent-one', 'opensea-drop-0001')
   assert.equal(refundPlan.order.state, 'refunding')
   assert.equal(refundPlan.transaction.to, REFUND)
-  assert.equal(refundPlan.transaction.valueWei, '16744000000000000')
+  assert.equal(refundPlan.transaction.valueWei, '16592800000000000')
   assert.equal(refundPlan.transaction.maxFeePerGasWei, '36000000000')
   const refunded = await app.recordRefund(
     'agent-one',
@@ -516,7 +516,7 @@ test('records only a mint matching the immutable plan and exact NFT delivery', a
     { refundTransactionHash: REFUND_HASH },
   )
   assert.equal(refunded.state, 'refunded')
-  assert.equal(refunded.refund?.amountWei, '16744000000000000')
+  assert.equal(refunded.refund?.amountWei, '16592800000000000')
 })
 
 test('refund can be replanned only after an unbroadcast plan expires', async () => {
@@ -536,7 +536,7 @@ test('refund can be replanned only after an unbroadcast plan expires', async () 
   )
 
   now = Date.parse(first.order.refundPlan!.expiresAt) + 1
-  chain.refund.valueWei = '16744000000000000'
+  chain.refund.valueWei = '16592800000000000'
   const replacement = await app.prepareRefund('agent-one', 'opensea-drop-0001')
   assert.notEqual(replacement.order.refundPlan?.planId, first.order.refundPlan?.planId)
   assert.equal(replacement.order.state, 'refunding')
@@ -555,7 +555,7 @@ test('refund reserves the assisted-wallet fee floor when RPC fees are unrealisti
 
   const refundPlan = await app.prepareRefund('agent-one', 'opensea-drop-0001')
   assert.equal(refundPlan.transaction.maxFeePerGasWei, '1500000000')
-  assert.equal(refundPlan.transaction.valueWei, '17468500000000000')
+  assert.equal(refundPlan.transaction.valueWei, '17462200000000000')
 })
 
 test('SQLite persistence preserves orders and globally unique deposit claims', async () => {

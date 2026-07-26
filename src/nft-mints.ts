@@ -11,6 +11,7 @@ const TX_HASH = /^0x[0-9a-fA-F]{64}$/
 const UINT = /^(0|[1-9][0-9]*)$/
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
 const MIN_ASSISTED_REFUND_MAX_FEE_PER_GAS_WEI = 1_500_000_000n
+const ASSISTED_REFUND_BALANCE_HEADROOM_PERCENT = 20n
 
 export const NFT_MINT_SERVICE_FEE_ATOMIC = '1000000'
 export const NFT_MINT_ORDER_ROUTE = '/v1/okx/nft-mints/orders'
@@ -483,11 +484,19 @@ export class NftMintService {
       + BigInt(order.mint.gasCostWei)
       + BigInt(order.delivery.gasCostWei)
     const refundGasReserve = bufferedMaxFeePerGas * this.dependencies.refundGasLimit
+    // OKX's assisted-wallet preflight applies its own fee allowance and rejects
+    // transactions that sweep the balance exactly, even when the explicit gas
+    // reserve equals gasLimit * maxFeePerGas. Keep independent headroom so the
+    // bounded refund remains executable without silently raising its fee cap.
+    const walletBalanceHeadroom = (
+      refundGasReserve * ASSISTED_REFUND_BALANCE_HEADROOM_PERCENT + 99n
+    ) / 100n
+    const totalRefundReserve = refundGasReserve + walletBalanceHeadroom
     const deposited = BigInt(order.deposit.amountWei)
-    if (spentBeforeRefund + refundGasReserve >= deposited) {
+    if (spentBeforeRefund + totalRefundReserve >= deposited) {
       throw new ConciergeError('NFT_REFUND_BALANCE_INSUFFICIENT', 'No safely refundable ETH remains after execution and refund gas.', 409)
     }
-    const amountWei = deposited - spentBeforeRefund - refundGasReserve
+    const amountWei = deposited - spentBeforeRefund - totalRefundReserve
     const createdAt = new Date(now).toISOString()
     const expiresAt = new Date(now + this.dependencies.planTtlSeconds * 1000).toISOString()
     const planCore = {
