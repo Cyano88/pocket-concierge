@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
   title: Pocket Concierge API
-  version: 0.3.0
-  description: Simple household errands backed by deterministic authority, noncustodial buyer execution, and verifiable receipts.
+  version: 0.4.0
+  description: Governed household errands and customer-funded Ethereum NFT mint delivery with verifiable receipts.
 servers:
   - url: http://localhost:4310
 security:
@@ -53,6 +53,169 @@ paths:
       responses:
         "200":
           description: Verified, supported, and unavailable errand adapters
+  /v1/okx/nft-mints/orders:
+    post:
+      security: []
+      operationId: createPaidNftMintOrder
+      summary: Pay 1 USDT to create one bounded, customer-funded Ethereum mint-and-deliver order
+      description: |
+        The 1-USDT X Layer payment is Pocket's service fee. It is separate from the
+        native ETH execution capital. The paid replay returns the immutable order,
+        a secret order access token, the Ethereum treasury address, and the exact
+        maximum ETH deposit required before the order can become armed.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NftMintOrderInput"
+      responses:
+        "201":
+          description: Order created; deposit instructions and order access token returned
+        "200":
+          description: Idempotent replay of the identical immutable order
+        "402":
+          description: 1-USDT exact EIP-3009 payment challenge on X Layer
+          headers:
+            PAYMENT-REQUIRED:
+              required: true
+              schema: { type: string }
+        "409":
+          description: externalId already belongs to a different immutable order
+  /v1/nft-mints/orders/{externalId}:
+    get:
+      operationId: getNftMintOrder
+      security:
+        - orderToken: []
+      parameters:
+        - $ref: "#/components/parameters/ExternalId"
+      responses:
+        "200":
+          description: Current order state and verified transaction evidence
+        "401":
+          description: Missing or invalid order access token
+  /v1/nft-mints/orders/{externalId}/funding:
+    post:
+      operationId: confirmNftMintFunding
+      security:
+        - orderToken: []
+      parameters:
+        - $ref: "#/components/parameters/ExternalId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [depositTransactionHash]
+              properties:
+                depositTransactionHash:
+                  type: string
+                  pattern: "^0x[0-9a-fA-F]{64}$"
+      responses:
+        "200":
+          description: Deposit verified and order armed
+        "409":
+          description: Deposit mismatched, insufficient, confirming, failed, expired, or already claimed
+  /v1/nft-mints/orders/{externalId}/prepare:
+    post:
+      operationId: prepareNftMintExecution
+      summary: Internal signer-worker endpoint; revalidate and prepare the bounded SeaDrop transaction
+      security:
+        - operatorKey: []
+      parameters:
+        - $ref: "#/components/parameters/ExternalId"
+      responses:
+        "200":
+          description: Short-lived transaction plan within the immutable customer limits
+        "409":
+          description: Order is unfunded, expired, sold out, or outside its price/cost limits
+  /v1/nft-mints/orders/{externalId}/minted:
+    post:
+      operationId: recordNftMint
+      summary: Internal signer-worker endpoint; verify the mined token from its transaction hash
+      security:
+        - operatorKey: []
+      parameters:
+        - $ref: "#/components/parameters/ExternalId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TransactionHashInput"
+      responses:
+        "200":
+          description: Mint verified; exact token ID recorded for delivery
+  /v1/nft-mints/orders/{externalId}/delivery-plan:
+    post:
+      operationId: prepareNftDelivery
+      summary: Internal signer-worker endpoint; prepare the exact NFT transfer
+      security:
+        - operatorKey: []
+      parameters:
+        - $ref: "#/components/parameters/ExternalId"
+      responses:
+        "200":
+          description: Short-lived transfer plan bound to the minted token and declared recipient
+  /v1/nft-mints/orders/{externalId}/delivered:
+    post:
+      operationId: recordNftDelivery
+      summary: Internal signer-worker endpoint; verify transfer of the minted token to the declared recipient
+      security:
+        - operatorKey: []
+      parameters:
+        - $ref: "#/components/parameters/ExternalId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [deliveryTransactionHash]
+              properties:
+                deliveryTransactionHash:
+                  type: string
+                  pattern: "^0x[0-9a-fA-F]{64}$"
+      responses:
+        "200":
+          description: Delivery verified with transaction hash, token ID, recipient, and gas evidence
+  /v1/nft-mints/orders/{externalId}/refund:
+    post:
+      operationId: prepareNftMintRefund
+      summary: Internal signer-worker endpoint; calculate and prepare the unused-ETH refund
+      security:
+        - operatorKey: []
+      parameters:
+        - $ref: "#/components/parameters/ExternalId"
+      responses:
+        "200":
+          description: Exact refund plan after verified mint and delivery costs
+  /v1/nft-mints/orders/{externalId}/refunded:
+    post:
+      operationId: recordNftMintRefund
+      summary: Internal signer-worker endpoint; verify the exact refund transfer
+      security:
+        - operatorKey: []
+      parameters:
+        - $ref: "#/components/parameters/ExternalId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [refundTransactionHash]
+              properties:
+                refundTransactionHash:
+                  type: string
+                  pattern: "^0x[0-9a-fA-F]{64}$"
+      responses:
+        "200":
+          description: Refund verified; order finalized with complete purchase, delivery, and refund evidence
   /v1/errands:
     post:
       operationId: createErrand
@@ -255,15 +418,25 @@ components:
     bearerAuth:
       type: http
       scheme: bearer
+    orderToken:
+      type: apiKey
+      in: header
+      name: X-Order-Token
+    operatorKey:
+      type: apiKey
+      in: header
+      name: X-Operator-Key
   parameters:
-    ErrandId:
-      name: errandId
+    ExternalId:
+      name: externalId
       in: path
       required: true
       schema:
         type: string
-    ExternalId:
-      name: externalId
+        minLength: 8
+        maxLength: 128
+    ErrandId:
+      name: errandId
       in: path
       required: true
       schema:
@@ -275,6 +448,62 @@ components:
       schema:
         type: string
   schemas:
+    NftMintOrderInput:
+      type: object
+      additionalProperties: false
+      required:
+        - externalId
+        - collectionSlug
+        - nftContract
+        - nftRecipient
+        - refundAddress
+        - fundingAddress
+        - quantity
+        - maxMintPriceWei
+        - maxTotalCostWei
+        - expiresAt
+      properties:
+        externalId:
+          type: string
+          minLength: 8
+          maxLength: 128
+          description: Caller-provided idempotency identifier
+        collectionSlug:
+          type: string
+          pattern: "^[a-z0-9][a-z0-9-]{1,99}$"
+        nftContract:
+          type: string
+          description: Expected Ethereum ERC-721 collection address
+        nftRecipient:
+          type: string
+          description: Ethereum address that must receive the minted NFT
+        refundAddress:
+          type: string
+          description: Ethereum address that receives unused or refunded execution capital
+        fundingAddress:
+          type: string
+          description: Ethereum address that must send the execution-capital deposit
+        quantity:
+          type: integer
+          const: 1
+        maxMintPriceWei:
+          type: string
+          pattern: "^(0|[1-9][0-9]*)$"
+        maxTotalCostWei:
+          type: string
+          pattern: "^[1-9][0-9]*$"
+          description: Full ETH cap covering mint, delivery, refund gas, and safety reserve
+        expiresAt:
+          type: string
+          format: date-time
+    TransactionHashInput:
+      type: object
+      additionalProperties: false
+      required: [mintTransactionHash]
+      properties:
+        mintTransactionHash:
+          type: string
+          pattern: "^0x[0-9a-fA-F]{64}$"
     AuthorityCheckInput:
       type: object
       additionalProperties: false

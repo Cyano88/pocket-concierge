@@ -18,6 +18,11 @@ import {
   OKX_AUTHORITY_CHECK_ROUTE,
 } from '../src/authority-check.js'
 import { digest } from '../src/validation.js'
+import {
+  NFT_MINT_ORDER_OUTPUT_SCHEMA,
+  NFT_MINT_ORDER_ROUTE,
+  NFT_MINT_SERVICE_FEE_ATOMIC,
+} from '../src/nft-mints.js'
 
 const payTo = '0x988263a851afe17f8a827eda81269f9fb7553cbc'
 const transaction = '0x1c6ca55a889644bc2d96c3888c0a0a8963484f9992e18003be6dc2648612d5f7'
@@ -149,6 +154,42 @@ test('reusable POST authority check advertises the same exact paid contract', as
   assert.equal(challenge.accepts[0]?.amount, '10000')
   assert.equal(challenge.accepts[0]?.scheme, 'exact')
   assert.equal(challenge.resource?.url, `https://concierge.example.com${OKX_AUTHORITY_CHECK_ROUTE}`)
+})
+
+test('NFT order endpoint advertises a non-zero 1-USDT EIP-3009 service fee and full replay body', async () => {
+  const protector = new OkxPaidRouteProtector({
+    apiKey: 'api-key',
+    secretKey: 'secret-key',
+    passphrase: 'passphrase',
+    payTo,
+    publicUrl: 'https://concierge.example.com',
+  }, {
+    method: 'POST',
+    path: NFT_MINT_ORDER_ROUTE,
+    amountAtomic: NFT_MINT_SERVICE_FEE_ATOMIC,
+    description: 'Create one bounded NFT mint order.',
+    serviceName: 'Pocket NFT Mint & Deliver',
+    tags: ['nft', 'mint'],
+    outputSchema: NFT_MINT_ORDER_OUTPUT_SCHEMA,
+  }, () => fakeFacilitator() as never)
+  const challenged = await protector.protect(new Request(
+    `https://concierge.example.com${NFT_MINT_ORDER_ROUTE}`,
+    { method: 'POST' },
+  ), { externalId: 'agent-opensea-mint-0001' })
+  assert.equal(challenged.status, 'challenge')
+  if (challenged.status !== 'challenge') return
+  const encoded = challenged.response.headers.get('payment-required')
+  assert.ok(encoded)
+  const challenge = decodePaymentRequiredHeader(encoded)
+  assert.equal(challenge.accepts[0]?.amount, '1000000')
+  assert.equal(challenge.accepts[0]?.scheme, 'exact')
+  assert.equal(challenge.accepts[0]?.network, 'eip155:196')
+  assert.equal(challenge.accepts[0]?.asset, XLAYER_USDT0)
+  assert.equal('assetTransferMethod' in (challenge.accepts[0]?.extra ?? {}), false)
+  assert.deepEqual(
+    (challenge.extensions as { outputSchema?: unknown } | undefined)?.outputSchema,
+    NFT_MINT_ORDER_OUTPUT_SCHEMA,
+  )
 })
 
 test('paid replay proof is recomputable and privacy-limited', () => {

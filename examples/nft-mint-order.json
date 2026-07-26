@@ -1,0 +1,12 @@
+{
+  "externalId": "agent-opensea-mint-0001",
+  "collectionSlug": "replace-with-opensea-slug",
+  "nftContract": "0x2222222222222222222222222222222222222222",
+  "nftRecipient": "0x3333333333333333333333333333333333333333",
+  "refundAddress": "0x3333333333333333333333333333333333333333",
+  "fundingAddress": "0x5555555555555555555555555555555555555555",
+  "quantity": 1,
+  "maxMintPriceWei": "20000000000000000",
+  "maxTotalCostWei": "30000000000000000",
+  "expiresAt": "2026-08-01T12:00:00.000Z"
+}

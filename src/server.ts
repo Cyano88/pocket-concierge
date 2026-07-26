@@ -1,4 +1,6 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
+import { timingSafeEqual } from 'node:crypto'
+import { getAddress, isAddress } from 'viem'
 import { authenticate, parseAgentKeys } from './auth.js'
 import {
   evaluatePaidAuthorityCheck,
@@ -12,6 +14,14 @@ import { buildOkxAuthorityProof, OKX_AUTHORITY_PROOF_ROUTE } from './okx-proof.j
 import { ConciergeService, fetchJson } from './service.js'
 import { MemoryMissionStore, SqliteMissionStore } from './store.js'
 import { OkxAuthorityProofProtector, OkxPaidRouteProtector } from './x402-proof.js'
+import { EthereumNftChainGateway } from './nft-chain.js'
+import {
+  NFT_MINT_ORDER_OUTPUT_SCHEMA,
+  NFT_MINT_ORDER_ROUTE,
+  NFT_MINT_SERVICE_FEE_ATOMIC,
+  NftMintService,
+} from './nft-mints.js'
+import { MemoryNftMintStore, SqliteNftMintStore } from './nft-store.js'
 
 const PORT = Number(process.env.PORT || 4310)
 const keys = parseAgentKeys(process.env.POCKET_CONCIERGE_AGENT_KEYS)
@@ -47,6 +57,103 @@ const authorityCheckProtector = paidRouteConfig
       serviceName: 'Purchase Authority Check',
       tags: ['authority', 'spending', 'commerce', 'policy', 'xlayer'],
       outputSchema: OKX_AUTHORITY_CHECK_OUTPUT_SCHEMA,
+    })
+  : null
+function configuredInteger(raw: string | undefined, fallback: number, name: string, minimum: number, maximum: number) {
+  const value = Number(raw ?? fallback)
+  if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
+    throw new ConciergeError('NFT_CONFIG_INVALID', `${name} is outside its safe integer range.`, 500)
+  }
+  return value
+}
+
+function configuredBigInt(raw: string | undefined, fallback: string, name: string, minimum: bigint) {
+  const source = String(raw ?? fallback)
+  if (!/^[1-9][0-9]*$/.test(source)) {
+    throw new ConciergeError('NFT_CONFIG_INVALID', `${name} must be a positive decimal integer.`, 500)
+  }
+  const value = BigInt(source)
+  if (value < minimum) throw new ConciergeError('NFT_CONFIG_INVALID', `${name} is below its safe minimum.`, 500)
+  return value
+}
+
+function validEthereumRpcUrl(raw: string) {
+  try {
+    const url = new URL(raw)
+    return url.protocol === 'https:'
+      || (url.protocol === 'http:' && (url.hostname === '127.0.0.1' || url.hostname === 'localhost'))
+  } catch {
+    return false
+  }
+}
+
+const nftEnabled = String(process.env.POCKET_CONCIERGE_NFT_MINT_ENABLED || '').toLowerCase() === 'true'
+const nftRpcUrl = String(process.env.ETHEREUM_RPC_URL || '').trim()
+const nftTreasuryRaw = String(process.env.POCKET_CONCIERGE_NFT_TREASURY_ADDRESS || '').trim()
+const nftOrderTokenSecret = String(process.env.POCKET_CONCIERGE_NFT_ORDER_TOKEN_SECRET || '').trim()
+const nftOperatorKey = String(process.env.POCKET_CONCIERGE_NFT_OPERATOR_KEY || '').trim()
+const nftConfigComplete = Boolean(
+  nftEnabled
+  && paidRouteConfig
+  && databasePath
+  && nftRpcUrl
+  && validEthereumRpcUrl(nftRpcUrl)
+  && isAddress(nftTreasuryRaw, { strict: true })
+  && nftTreasuryRaw.toLowerCase() !== '0x0000000000000000000000000000000000000000'
+  && nftOrderTokenSecret.length >= 32
+  && nftOperatorKey.length >= 32
+  && nftOrderTokenSecret !== nftOperatorKey
+)
+const nftService = nftConfigComplete
+  ? new NftMintService({
+      store: databasePath ? new SqliteNftMintStore(databasePath) : new MemoryNftMintStore(),
+      chain: new EthereumNftChainGateway(nftRpcUrl),
+      treasuryAddress: getAddress(nftTreasuryRaw),
+      minimumConfirmations: configuredInteger(
+        process.env.POCKET_CONCIERGE_NFT_MIN_CONFIRMATIONS,
+        2,
+        'POCKET_CONCIERGE_NFT_MIN_CONFIRMATIONS',
+        1,
+        64,
+      ),
+      planTtlSeconds: configuredInteger(
+        process.env.POCKET_CONCIERGE_NFT_PLAN_TTL_SECONDS,
+        30,
+        'POCKET_CONCIERGE_NFT_PLAN_TTL_SECONDS',
+        10,
+        120,
+      ),
+      deliveryGasLimit: configuredBigInt(
+        process.env.POCKET_CONCIERGE_NFT_DELIVERY_GAS_LIMIT,
+        '120000',
+        'POCKET_CONCIERGE_NFT_DELIVERY_GAS_LIMIT',
+        50_000n,
+      ),
+      refundGasLimit: configuredBigInt(
+        process.env.POCKET_CONCIERGE_NFT_REFUND_GAS_LIMIT,
+        '21000',
+        'POCKET_CONCIERGE_NFT_REFUND_GAS_LIMIT',
+        21_000n,
+      ),
+      maximumOrderWei: configuredBigInt(
+        process.env.POCKET_CONCIERGE_NFT_MAX_ORDER_WEI,
+        '100000000000000000',
+        'POCKET_CONCIERGE_NFT_MAX_ORDER_WEI',
+        1n,
+      ),
+      orderTokenSecret: nftOrderTokenSecret,
+      now: () => Date.now(),
+    })
+  : null
+const nftOrderProtector = nftConfigComplete && paidRouteConfig
+  ? new OkxPaidRouteProtector(paidRouteConfig, {
+      method: 'POST',
+      path: NFT_MINT_ORDER_ROUTE,
+      amountAtomic: NFT_MINT_SERVICE_FEE_ATOMIC,
+      description: 'Create one bounded Ethereum public-mint errand with verified funding and NFT delivery.',
+      serviceName: 'Pocket NFT Mint & Deliver',
+      tags: ['nft', 'mint', 'opensea', 'seadrop', 'ethereum', 'delivery'],
+      outputSchema: NFT_MINT_ORDER_OUTPUT_SCHEMA,
     })
   : null
 const service = new ConciergeService({
@@ -95,6 +202,18 @@ async function body(req: IncomingMessage) {
   }
 }
 
+function bearer(value: string | undefined) {
+  return String(value ?? '').replace(/^Bearer\s+/i, '')
+}
+
+function requireNftOperator(value: string | undefined) {
+  const supplied = Buffer.from(String(value ?? ''))
+  const expected = Buffer.from(nftOperatorKey)
+  if (!expected.length || supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) {
+    throw new ConciergeError('NFT_OPERATOR_UNAUTHORIZED', 'A valid NFT execution-operator key is required.', 401)
+  }
+}
+
 const server = createServer(async (req, res) => {
   try {
     const method = req.method || 'GET'
@@ -125,6 +244,34 @@ const server = createServer(async (req, res) => {
       if (payment.status === 'challenge') return sendResponse(res, payment.response)
       return json(res, 200, evaluatePaidAuthorityCheck(requestBody, Date.now()), payment.headers)
     }
+    if (method === 'POST' && url.pathname === NFT_MINT_ORDER_ROUTE) {
+      if (!nftService || !nftOrderProtector) {
+        throw new ConciergeError(
+          'NFT_MINT_NOT_CONFIGURED',
+          'Pocket NFT Mint & Deliver is disabled until its Ethereum gateway and hardened signer operator are configured.',
+          503,
+        )
+      }
+      const requestBody = await body(req)
+      await nftService.assertCreatable('okx-marketplace', requestBody)
+      const payment = await nftOrderProtector.protect(new Request(`${publicUrl}${url.pathname}${url.search}`, {
+        method: 'POST',
+        headers: fetchHeaders(req),
+      }), requestBody)
+      if (payment.status === 'challenge') return sendResponse(res, payment.response)
+      const created = await nftService.create('okx-marketplace', requestBody)
+      return json(res, created.replayed ? 200 : 201, {
+        ok: true,
+        ...created,
+        next: {
+          action: 'deposit_ethereum',
+          chainId: 1,
+          amountWei: created.order.requiredDepositWei,
+          to: created.order.treasuryAddress,
+          then: `POST /v1/nft-mints/orders/${encodeURIComponent(created.order.externalId)}/funding`,
+        },
+      }, payment.headers)
+    }
     const receiptMatch = url.pathname.match(/^\/v1\/authority\/receipts\/(pr_[a-f0-9]{32})$/)
     if (method === 'GET' && receiptMatch?.[1]) {
       return json(res, 200, { ok: true, receipt: await service.getReceipt(receiptMatch[1]) })
@@ -134,7 +281,7 @@ const server = createServer(async (req, res) => {
         ok: true,
         service: 'Pocket Concierge',
         role: 'buyer-agent-orchestrator',
-        supportedActions: ['okx_bill'],
+        supportedActions: ['okx_bill', ...(nftConfigComplete ? ['ethereum_nft_mint'] : [])],
         lifecycle: ['planned', 'approved', 'executing', 'delivered', 'needs_review'],
         authority: {
           policyVersion: '1',
@@ -153,6 +300,12 @@ const server = createServer(async (req, res) => {
           action: 'prava_shop',
           status: 'not-implemented-before-event',
         },
+        nftMint: {
+          status: nftConfigComplete ? 'pilot-enabled' : 'disabled-until-signer-and-chain-configured',
+          serviceFee: '1 USDT on X Layer',
+          executionCapital: 'Customer deposits native ETH on Ethereum before the order is armed.',
+          custody: 'Pocket temporarily holds execution ETH and the minted NFT until delivery.',
+        },
       })
     }
     if (method === 'GET' && url.pathname === '/v1/capabilities') {
@@ -167,9 +320,67 @@ const server = createServer(async (req, res) => {
           verifiedPilot: { category: 'data', serviceId: 'mtn-data' },
         },
         unavailableUntilAdapterVerification: ['airtime', 'paid_brief', 'shopping'],
+        nftMint: {
+          enabled: nftConfigComplete,
+          paidEntrypoint: NFT_MINT_ORDER_ROUTE,
+          supported: ['ethereum-mainnet', 'opensea-seadrop', 'public-fcfs', 'quantity-1'],
+        },
         idempotency: 'externalId + cycleId',
         privacy: 'Send only opaque privateInputRef values; the buyer executor keeps customer references locally.',
       })
+    }
+    const nftOrderMatch = url.pathname.match(/^\/v1\/nft-mints\/orders\/([^/]+)$/)
+    if (method === 'GET' && nftOrderMatch?.[1]) {
+      if (!nftService) throw new ConciergeError('NFT_MINT_NOT_CONFIGURED', 'Pocket NFT Mint & Deliver is disabled.', 503)
+      const externalId = decodeURIComponent(nftOrderMatch[1])
+      const order = await nftService.authenticateOrder(
+        'okx-marketplace',
+        externalId,
+        req.headers['x-order-token'] as string | undefined ?? bearer(req.headers.authorization),
+      )
+      return json(res, 200, { ok: true, order })
+    }
+    const nftActionMatch = url.pathname.match(
+      /^\/v1\/nft-mints\/orders\/([^/]+)\/(funding|prepare|minted|delivery-plan|delivered|refund|refunded)$/,
+    )
+    if (method === 'POST' && nftActionMatch?.[1] && nftActionMatch[2]) {
+      if (!nftService) throw new ConciergeError('NFT_MINT_NOT_CONFIGURED', 'Pocket NFT Mint & Deliver is disabled.', 503)
+      const externalId = decodeURIComponent(nftActionMatch[1])
+      if (nftActionMatch[2] === 'funding') {
+        await nftService.authenticateOrder(
+          'okx-marketplace',
+          externalId,
+          req.headers['x-order-token'] as string | undefined ?? bearer(req.headers.authorization),
+        )
+        const order = await nftService.confirmFunding('okx-marketplace', externalId, await body(req))
+        return json(res, 200, { ok: true, order })
+      }
+      requireNftOperator(req.headers['x-operator-key'] as string | undefined)
+      if (nftActionMatch[2] === 'prepare') {
+        return json(res, 200, {
+          ok: true,
+          execution: await nftService.prepareExecution('okx-marketplace', externalId),
+        })
+      }
+      if (nftActionMatch[2] === 'delivery-plan') {
+        return json(res, 200, {
+          ok: true,
+          execution: await nftService.prepareDelivery('okx-marketplace', externalId),
+        })
+      }
+      if (nftActionMatch[2] === 'refund') {
+        return json(res, 200, {
+          ok: true,
+          execution: await nftService.prepareRefund('okx-marketplace', externalId),
+        })
+      }
+      const requestBody = await body(req)
+      const order = nftActionMatch[2] === 'minted'
+        ? await nftService.recordMint('okx-marketplace', externalId, requestBody)
+        : nftActionMatch[2] === 'delivered'
+          ? await nftService.recordDelivery('okx-marketplace', externalId, requestBody)
+          : await nftService.recordRefund('okx-marketplace', externalId, requestBody)
+      return json(res, 200, { ok: true, order })
     }
     if (!keys.size) throw new ConciergeError('SERVICE_NOT_CONFIGURED', 'Pocket Concierge agent keys are not configured.', 503)
     const ownerId = authenticate(req.headers.authorization, keys)
