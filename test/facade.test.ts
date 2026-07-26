@@ -4,6 +4,7 @@ import { evaluatePaidAuthorityCheck } from '../src/authority-check.js'
 import { errandToMissionInput, errandView } from '../src/errands.js'
 import { ConciergeService } from '../src/service.js'
 import { MemoryMissionStore } from '../src/store.js'
+import { digest } from '../src/validation.js'
 
 const now = Date.parse('2026-07-25T10:00:00.000Z')
 
@@ -34,6 +35,12 @@ test('paid authority check is reusable and deterministic for approve, escalate, 
   assert.equal(approved.decision, 'APPROVE')
   assert.equal(approved.nextAction?.type, 'execute_within_mandate')
   assert.equal(approved.exampleUsed, false)
+  assert.equal(approved.deliverable.status, 'verified')
+  assert.equal(approved.deliverable.decisionHash, approved.decisionHash)
+  assert.equal(approved.deliverable.inputManifestHash, digest(approved.request))
+  assert.equal(approved.verification.valid, true)
+  assert.equal(digest(approved.verification.canonicalPayload), approved.verification.expectedHash)
+  assert.equal(approved.verification.recomputedHash, approved.decisionHash)
 
   const escalated = evaluatePaidAuthorityCheck(authorityInput('0.20', '0.10'), now)
   assert.equal(escalated.decision, 'ESCALATE')

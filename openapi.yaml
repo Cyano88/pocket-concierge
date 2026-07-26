@@ -21,7 +21,11 @@ paths:
               $ref: "#/components/schemas/AuthorityCheckInput"
       responses:
         "200":
-          description: APPROVE, ESCALATE, or BLOCK with a recomputable decision hash
+          description: APPROVE, ESCALATE, or BLOCK with a self-contained, independently recomputable proof
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthorityCheckOutput"
         "402":
           description: 0.01-USDT exact EIP-3009 payment challenge on X Layer
           headers:
@@ -568,6 +572,66 @@ components:
               items: { type: string }
             maximumPerActionUsdt: { type: string }
             approvalThresholdUsdt: { type: string }
+    AuthorityCheckOutput:
+      type: object
+      required:
+        - ok
+        - service
+        - request
+        - decision
+        - reasons
+        - decisionId
+        - decisionHash
+        - evaluatedAt
+        - nextAction
+        - deliverable
+        - verification
+        - privacy
+      properties:
+        ok: { type: boolean, const: true }
+        service: { type: string }
+        exampleUsed: { type: boolean }
+        request: { type: object }
+        decision:
+          type: string
+          enum: [APPROVE, ESCALATE, BLOCK]
+        reasons:
+          type: array
+          items: { type: string }
+        decisionId: { type: string }
+        decisionHash:
+          type: string
+          pattern: "^[a-f0-9]{64}$"
+        evaluatedAt: { type: string, format: date-time }
+        nextAction:
+          oneOf:
+            - type: object
+            - type: "null"
+        deliverable:
+          type: object
+          required: [type, status, decision, reasons, nextAction, inputManifestHash, decisionHash]
+          properties:
+            type: { type: string, const: governed_purchase_decision }
+            status: { type: string, const: verified }
+            decision: { type: string, enum: [APPROVE, ESCALATE, BLOCK] }
+            reasons: { type: array, items: { type: string } }
+            nextAction:
+              oneOf:
+                - type: object
+                - type: "null"
+            inputManifestHash: { type: string, pattern: "^[a-f0-9]{64}$" }
+            decisionHash: { type: string, pattern: "^[a-f0-9]{64}$" }
+        verification:
+          type: object
+          required: [valid, algorithm, canonicalization, canonicalPayload, expectedHash, recomputedHash]
+          properties:
+            valid: { type: boolean, const: true }
+            algorithm: { type: string, const: SHA-256 }
+            canonicalization: { type: string }
+            canonicalPayload: { type: object }
+            expectedHash: { type: string, pattern: "^[a-f0-9]{64}$" }
+            recomputedHash: { type: string, pattern: "^[a-f0-9]{64}$" }
+        privacy: { type: string }
     ErrandInput:
       type: object
       additionalProperties: false

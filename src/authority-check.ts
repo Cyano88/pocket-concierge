@@ -20,6 +20,8 @@ export const OKX_AUTHORITY_CHECK_OUTPUT_SCHEMA = {
     decision: 'APPROVE | ESCALATE | BLOCK',
     decisionHash: 'sha256',
     nextAction: 'object | null',
+    deliverable: 'verified governed-purchase decision',
+    verification: 'self-contained canonical SHA-256 proof',
   },
 } as const
 
@@ -157,7 +159,14 @@ export function evaluatePaidAuthorityCheck(raw: unknown, now: number) {
       approvalThresholdUsdt,
     },
   }
-  const decisionHash = digest({ publicInput, evaluatedAt, decision, reasons })
+  const canonicalPayload = { publicInput, evaluatedAt, decision, reasons }
+  const decisionHash = digest(canonicalPayload)
+  const inputManifestHash = digest(publicInput)
+  const nextAction = decision === 'APPROVE'
+    ? { type: 'execute_within_mandate', maximumUsdt: amountUsdt, expiresAt }
+    : decision === 'ESCALATE'
+      ? { type: 'request_exact_human_approval', maximumUsdt: amountUsdt, expiresAt }
+      : null
   return {
     ok: true,
     service: 'Pocket Concierge Purchase Authority Check',
@@ -168,11 +177,24 @@ export function evaluatePaidAuthorityCheck(raw: unknown, now: number) {
     decisionId: `pad_${decisionHash.slice(0, 32)}`,
     decisionHash,
     evaluatedAt,
-    nextAction: decision === 'APPROVE'
-      ? { type: 'execute_within_mandate', maximumUsdt: amountUsdt, expiresAt }
-      : decision === 'ESCALATE'
-        ? { type: 'request_exact_human_approval', maximumUsdt: amountUsdt, expiresAt }
-        : null,
+    nextAction,
+    deliverable: {
+      type: 'governed_purchase_decision',
+      status: 'verified',
+      decision,
+      reasons,
+      nextAction,
+      inputManifestHash,
+      decisionHash,
+    },
+    verification: {
+      valid: digest(canonicalPayload) === decisionHash,
+      algorithm: 'SHA-256',
+      canonicalization: 'Recursively sort object keys lexicographically, preserve array order, encode canonical JSON as UTF-8.',
+      canonicalPayload,
+      expectedHash: decisionHash,
+      recomputedHash: digest(canonicalPayload),
+    },
     privacy: 'No raw phone, meter, smartcard, email, wallet key, or provider status token was accepted.',
   }
 }

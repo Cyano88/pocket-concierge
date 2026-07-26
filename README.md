@@ -4,7 +4,7 @@ Pocket Concierge is a deterministic authority and buyer-agent orchestrator for h
 
 The simple integration surface is:
 
-- `POST /v1/okx/authority-check` — reusable 0.01-USDT purchase decision for any privacy-safe agent action.
+- `POST /v1/okx/authority-check` — reusable 0.01-USDT purchase decision with a self-contained, independently recomputable SHA-256 proof.
 - `POST /v1/errands` — create one idempotent household errand cycle.
 - `POST /v1/errands/{errandId}/authorize` — approve the exact manifest and receive the buyer-side payment instruction.
 - `POST /v1/errands/{errandId}/complete` — verify provider delivery and receive the authority receipt.

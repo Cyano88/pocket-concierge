@@ -25,11 +25,26 @@ The result has one decision and one next action:
   "nextAction": {
     "type": "execute_within_mandate",
     "maximumUsdt": "0.20"
+  },
+  "deliverable": {
+    "type": "governed_purchase_decision",
+    "status": "verified",
+    "inputManifestHash": "<sha256>",
+    "decisionHash": "<sha256>"
+  },
+  "verification": {
+    "valid": true,
+    "algorithm": "SHA-256",
+    "canonicalPayload": {},
+    "expectedHash": "<sha256>",
+    "recomputedHash": "<same sha256>"
   }
 }
 ```
 
-An empty paid replay returns a safe working example so marketplace reviewers always receive a deliverable.
+The verification block contains the complete canonical payload and canonicalization rules, allowing
+any buyer to reproduce the decision hash independently. An empty paid replay returns a safe working
+example so marketplace reviewers always receive the same verifiable deliverable shape.
 
 ## 2. Create a household errand cycle
 
