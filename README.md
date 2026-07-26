@@ -201,7 +201,11 @@ treasury-to-recipient token transfer.
 
 The checked-in service does not contain or accept a raw treasury private key. The controlled mainnet
 pilot has completed payment, funding, mint, delivery, and refund. Public order creation remains gated
-while failed-mint cancellation, unattended execution leases, and incident recovery are hardened.
+while the final unattended HSM/MPC signer adapter is selected and verified. The API now atomically
+claims one treasury transaction lease at a time, reserves and verifies the Ethereum nonce for mint,
+delivery, and refund, supports unfunded cancellation, and deducts independently verified failed-mint
+gas before preparing an immutable refund. The isolated signer guard maintains a second one-use nonce
+ledger and refuses duplicate plans before calling a future HSM/MPC broadcast backend.
 
 ## Railway deployment
 
@@ -226,6 +230,7 @@ POCKET_CONCIERGE_NFT_TREASURY_ADDRESS=<Ethereum execution treasury>
 POCKET_CONCIERGE_NFT_ORDER_TOKEN_SECRET=<at-least-32-random-characters>
 POCKET_CONCIERGE_NFT_OPERATOR_KEY=<separate-at-least-32-random-characters>
 POCKET_CONCIERGE_NFT_PILOT_KEY=<separate-at-least-32-random-characters>
+POCKET_CONCIERGE_NFT_WORKER_ID=<stable-isolated-signer-worker-id>
 POCKET_CONCIERGE_NFT_WORKER_MAX_FEE_PER_GAS_WEI=<operator-approved Ethereum fee ceiling>
 POCKET_CONCIERGE_NFT_MAX_ORDER_WEI=100000000000000000
 POCKET_CONCIERGE_NFT_DEMO_EXTERNAL_ID=<fully-verified pilot external ID>
@@ -247,6 +252,7 @@ Dry-run a prepared action:
 $env:POCKET_CONCIERGE_URL='https://pocket-concierge-production.up.railway.app'
 $env:POCKET_CONCIERGE_NFT_OPERATOR_KEY='<operator key>'
 $env:POCKET_CONCIERGE_NFT_TREASURY_ADDRESS='<Ethereum execution treasury>'
+$env:POCKET_CONCIERGE_NFT_WORKER_ID='pocket-nft-signer-1'
 $env:POCKET_CONCIERGE_NFT_WORKER_MAX_FEE_PER_GAS_WEI='<wei ceiling>'
 npm run nft:worker -- mint <externalId>
 ```
@@ -269,6 +275,16 @@ disconnects after broadcast, recover from the known transaction hash without sen
 ```powershell
 npm run nft:worker -- refund <externalId> --transaction-hash 0x...
 ```
+
+For a reverted mint, recover the exact leased nonce and gas cost without rebroadcasting:
+
+```powershell
+npm run nft:worker -- mint <externalId> --failed-transaction-hash 0x...
+```
+
+The customer can then call `POST /v1/nft-mints/orders/{externalId}/cancel` with the order token.
+Pocket prepares a refund to the immutable refund address after subtracting only verified failed-mint
+gas and the bounded refund reserve.
 
 OKX Agentic Wallet's contract-call interface does not accept a caller-selected transaction nonce or
 maximum fee per gas. Mint and delivery therefore remain assisted rather than unattended FCFS

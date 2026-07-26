@@ -164,6 +164,29 @@ paths:
           description: Deposit verified and order armed
         "409":
           description: Deposit mismatched, insufficient, confirming, failed, expired, or already claimed
+  /v1/nft-mints/orders/{externalId}/cancel:
+    post:
+      operationId: cancelNftMintOrder
+      security:
+        - orderToken: []
+      summary: Cancel an unfunded order or request an exact pre-mint refund
+      parameters:
+        - $ref: "#/components/parameters/ExternalId"
+      requestBody:
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              properties:
+                reason:
+                  type: string
+                  enum: [customer_cancelled, mint_failed, order_expired]
+      responses:
+        "200":
+          description: Unfunded order cancelled or funded order moved to cancelling
+        "409":
+          description: Reserved mint nonce still requires a verified success or failure outcome
   /v1/nft-mints/orders/{externalId}/prepare:
     post:
       operationId: prepareNftMintExecution
@@ -172,11 +195,12 @@ paths:
         - operatorKey: []
       parameters:
         - $ref: "#/components/parameters/ExternalId"
+        - $ref: "#/components/parameters/WorkerId"
       responses:
         "200":
-          description: Short-lived transaction plan within the immutable customer limits
+          description: Atomically claimed mint lease with calldata, cost ceilings, and reserved Ethereum nonce
         "409":
-          description: Order is unfunded, expired, sold out, or outside its price/cost limits
+          description: Order is unfunded, treasury lease is busy, nonce is reserved, or cost exceeds the mandate
   /v1/nft-mints/orders/{externalId}/minted:
     post:
       operationId: recordNftMint
@@ -194,6 +218,31 @@ paths:
       responses:
         "200":
           description: Mint verified; exact token ID recorded for delivery
+  /v1/nft-mints/orders/{externalId}/failed:
+    post:
+      operationId: recordFailedNftMint
+      summary: Verify a reverted mint against the leased calldata, value, sender, and nonce
+      security:
+        - operatorKey: []
+      parameters:
+        - $ref: "#/components/parameters/ExternalId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [mintTransactionHash]
+              properties:
+                mintTransactionHash:
+                  type: string
+                  pattern: "^0x[0-9a-fA-F]{64}$"
+      responses:
+        "200":
+          description: Failed mint gas verified; order is eligible for a cancellation refund
+        "409":
+          description: Transaction is unconfirmed or does not match the reserved mint plan and nonce
   /v1/nft-mints/orders/{externalId}/delivery-plan:
     post:
       operationId: prepareNftDelivery
@@ -202,6 +251,7 @@ paths:
         - operatorKey: []
       parameters:
         - $ref: "#/components/parameters/ExternalId"
+        - $ref: "#/components/parameters/WorkerId"
       responses:
         "200":
           description: Short-lived transfer plan bound to the minted token and declared recipient
@@ -236,6 +286,7 @@ paths:
         - operatorKey: []
       parameters:
         - $ref: "#/components/parameters/ExternalId"
+        - $ref: "#/components/parameters/WorkerId"
       responses:
         "200":
           description: Exact refund plan after verified mint and delivery costs
@@ -485,6 +536,15 @@ components:
         type: string
         minLength: 8
         maxLength: 128
+    WorkerId:
+      name: X-Worker-Id
+      in: header
+      required: true
+      description: Stable identifier for the isolated signer worker claiming the one-use transaction lease.
+      schema:
+        type: string
+        minLength: 3
+        maxLength: 80
     ErrandId:
       name: errandId
       in: path

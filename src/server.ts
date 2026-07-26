@@ -420,7 +420,7 @@ const server = createServer(async (req, res) => {
       return json(res, 200, { ok: true, order })
     }
     const nftActionMatch = url.pathname.match(
-      /^\/v1\/nft-mints\/orders\/([^/]+)\/(funding|prepare|minted|delivery-plan|delivered|refund|refunded)$/,
+      /^\/v1\/nft-mints\/orders\/([^/]+)\/(funding|cancel|prepare|minted|failed|delivery-plan|delivered|refund|refunded)$/,
     )
     if (method === 'POST' && nftActionMatch?.[1] && nftActionMatch[2]) {
       if (!nftService) throw new ConciergeError('NFT_MINT_NOT_CONFIGURED', 'Pocket NFT Mint & Deliver is disabled.', 503)
@@ -434,28 +434,53 @@ const server = createServer(async (req, res) => {
         const order = await nftService.confirmFunding('okx-marketplace', externalId, await body(req))
         return json(res, 200, { ok: true, order })
       }
+      if (nftActionMatch[2] === 'cancel') {
+        await nftService.authenticateOrder(
+          'okx-marketplace',
+          externalId,
+          req.headers['x-order-token'] as string | undefined ?? bearer(req.headers.authorization),
+        )
+        return json(res, 200, {
+          ok: true,
+          order: await nftService.cancel('okx-marketplace', externalId, await body(req)),
+        })
+      }
       requireNftOperator(req.headers['x-operator-key'] as string | undefined)
       if (nftActionMatch[2] === 'prepare') {
         return json(res, 200, {
           ok: true,
-          execution: await nftService.prepareExecution('okx-marketplace', externalId),
+          execution: await nftService.prepareExecution(
+            'okx-marketplace',
+            externalId,
+            req.headers['x-worker-id'] as string | undefined ?? '',
+          ),
         })
       }
       if (nftActionMatch[2] === 'delivery-plan') {
         return json(res, 200, {
           ok: true,
-          execution: await nftService.prepareDelivery('okx-marketplace', externalId),
+          execution: await nftService.prepareDelivery(
+            'okx-marketplace',
+            externalId,
+            req.headers['x-worker-id'] as string | undefined ?? '',
+          ),
         })
       }
       if (nftActionMatch[2] === 'refund') {
         return json(res, 200, {
           ok: true,
-          execution: await nftService.prepareRefund('okx-marketplace', externalId),
+          execution: await nftService.prepareRefund(
+            'okx-marketplace',
+            externalId,
+            req.headers['x-worker-id'] as string | undefined ?? '',
+          ),
         })
       }
       const requestBody = await body(req)
       const order = nftActionMatch[2] === 'minted'
         ? await nftService.recordMint('okx-marketplace', externalId, requestBody)
+        : nftActionMatch[2] === 'failed'
+          ? await nftService.recordFailedMint('okx-marketplace', externalId, requestBody)
         : nftActionMatch[2] === 'delivered'
           ? await nftService.recordDelivery('okx-marketplace', externalId, requestBody)
           : await nftService.recordRefund('okx-marketplace', externalId, requestBody)

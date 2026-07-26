@@ -17,6 +17,7 @@ import type {
   BuiltMintTransaction,
   VerifiedDelivery,
   VerifiedDeposit,
+  VerifiedFailedMint,
   VerifiedMint,
   VerifiedRefund,
 } from './nft-types.js'
@@ -78,8 +79,17 @@ export interface NftChainGateway {
   validateMint(transaction: BuiltMintTransaction, nftContract: Address, treasuryAddress: Address): void
   estimateMintGas(transaction: BuiltMintTransaction, treasuryAddress: Address): Promise<bigint>
   maxFeePerGas(): Promise<bigint>
+  pendingNonce(address: Address): Promise<number>
   verifyDeposit(transactionHash: Hex): Promise<VerifiedDeposit>
   verifyMint(transactionHash: Hex, nftContract: Address, treasuryAddress: Address): Promise<VerifiedMint>
+  verifyFailedMint(
+    transactionHash: Hex,
+    treasuryAddress: Address,
+    target: Address,
+    expectedCalldataHash: Hex,
+    expectedValueWei: bigint,
+    expectedNonce: number,
+  ): Promise<VerifiedFailedMint>
   prepareDelivery(
     nftContract: Address,
     treasuryAddress: Address,
@@ -239,6 +249,10 @@ export class EthereumNftChainGateway implements NftChainGateway {
     })
   }
 
+  async pendingNonce(address: Address) {
+    return this.client.getTransactionCount({ address, blockTag: 'pending' })
+  }
+
   async maxFeePerGas() {
     const fees = await this.client.estimateFeesPerGas()
     if (fees.maxFeePerGas) return fees.maxFeePerGas
@@ -300,7 +314,49 @@ export class EthereumNftChainGateway implements NftChainGateway {
       to: getAddress(transaction.to),
       calldata: transaction.input,
       valueWei: transaction.value.toString(),
+      nonce: transaction.nonce,
       tokenId,
+      blockNumber: receipt.blockNumber,
+      gasCostWei: transactionCost(receipt),
+      confirmations: Number(blockNumber - receipt.blockNumber + 1n),
+    }
+  }
+
+  async verifyFailedMint(
+    transactionHash: Hex,
+    treasuryAddress: Address,
+    target: Address,
+    expectedCalldataHash: Hex,
+    expectedValueWei: bigint,
+    expectedNonce: number,
+  ): Promise<VerifiedFailedMint> {
+    const [transaction, receipt, blockNumber] = await Promise.all([
+      this.client.getTransaction({ hash: transactionHash }),
+      this.client.getTransactionReceipt({ hash: transactionHash }),
+      this.client.getBlockNumber(),
+    ])
+    if (
+      receipt.status !== 'reverted'
+      || !transaction.to
+      || getAddress(transaction.from) !== treasuryAddress
+      || getAddress(transaction.to) !== target
+      || keccak256(transaction.input).toLowerCase() !== expectedCalldataHash.toLowerCase()
+      || transaction.value !== expectedValueWei
+      || transaction.nonce !== expectedNonce
+    ) {
+      throw new ConciergeError(
+        'NFT_FAILED_MINT_MISMATCH',
+        'Failed transaction does not match the reserved mint plan and nonce.',
+        409,
+      )
+    }
+    return {
+      transactionHash,
+      from: getAddress(transaction.from),
+      to: getAddress(transaction.to),
+      calldata: transaction.input,
+      valueWei: transaction.value.toString(),
+      nonce: transaction.nonce,
       blockNumber: receipt.blockNumber,
       gasCostWei: transactionCost(receipt),
       confirmations: Number(blockNumber - receipt.blockNumber + 1n),
@@ -343,6 +399,7 @@ export class EthereumNftChainGateway implements NftChainGateway {
       to: getAddress(transaction.to),
       calldata: transaction.input,
       valueWei: transaction.value.toString(),
+      nonce: transaction.nonce,
       tokenId,
       blockNumber: receipt.blockNumber,
       gasCostWei: transactionCost(receipt),
@@ -396,6 +453,7 @@ export class EthereumNftChainGateway implements NftChainGateway {
       from: getAddress(transaction.from),
       to: getAddress(transaction.to),
       valueWei: transaction.value.toString(),
+      nonce: transaction.nonce,
       blockNumber: receipt.blockNumber,
       gasCostWei: transactionCost(receipt),
       confirmations: Number(blockNumber - receipt.blockNumber + 1n),

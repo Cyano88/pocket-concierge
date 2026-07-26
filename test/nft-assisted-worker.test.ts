@@ -32,19 +32,26 @@ const calldata = encodeFunctionData({
 
 function response(action: AssistedNftAction = 'mint') {
   const planField = action === 'mint' ? 'executionPlan' : action === 'deliver' ? 'deliveryPlan' : 'refundPlan'
-  const state = action === 'mint' ? 'armed' : action === 'deliver' ? 'delivering' : 'refunding'
+  const state = action === 'mint' ? 'minting' : action === 'deliver' ? 'delivering' : 'refunding'
   const target = action === 'mint' ? SEADROP_1_0 : action === 'deliver' ? NFT : REFUND
   const data = action === 'refund' ? '0x' : calldata
   const valueWei = action === 'mint' ? '10000000000000000' : action === 'refund' ? '5000000000000000' : '0'
   const gasLimit = action === 'mint' ? '180000' : action === 'deliver' ? '100000' : '21000'
   const plan = {
     planId: `${action === 'mint' ? 'nmp' : action === 'deliver' ? 'ndp' : 'nrp'}_123456`,
+    orderId: 'nmo_worker_test_001',
     target,
     calldataHash: keccak256(data),
     valueWei,
     gasLimit,
     maxFeePerGasWei: '30000000000',
-    ...(action === 'mint' ? { maximumExecutionCostWei: '20000000000000000' } : {}),
+    transactionNonce: '17',
+    leaseOwner: 'worker-test-1',
+    leaseExpiresAt: new Date(NOW + 30_000).toISOString(),
+    executionAttempt: 1,
+    ...(action === 'mint' ? {
+      maximumExecutionCostWei: '20000000000000000',
+    } : {}),
     ...(action === 'refund' ? { amountWei: valueWei } : {}),
     createdAt: new Date(NOW).toISOString(),
     expiresAt: new Date(NOW + 30_000).toISOString(),
@@ -53,6 +60,7 @@ function response(action: AssistedNftAction = 'mint') {
     ok: true,
     execution: {
       order: {
+        orderId: 'nmo_worker_test_001',
         externalId: 'mint-demo-001',
         chainId: 1,
         state,
@@ -72,6 +80,7 @@ function response(action: AssistedNftAction = 'mint') {
         valueWei,
         gasLimit,
         maxFeePerGasWei: '30000000000',
+        nonce: '17',
       },
     },
   }
@@ -82,6 +91,7 @@ function validate(raw: unknown, action: AssistedNftAction = 'mint') {
     action,
     externalId: 'mint-demo-001',
     treasuryAddress: TREASURY,
+    workerId: 'worker-test-1',
     maximumFeePerGasWei: '40000000000',
     now: NOW,
   })
@@ -110,6 +120,11 @@ test('assisted worker rejects chain, treasury, target, calldata, fee, and expiry
     (value: ReturnType<typeof response>) => { value.execution.transaction.to = NFT },
     (value: ReturnType<typeof response>) => { value.execution.transaction.data = '0x00' },
     (value: ReturnType<typeof response>) => { value.execution.transaction.maxFeePerGasWei = '50000000000' },
+    (value: ReturnType<typeof response>) => { value.execution.transaction.nonce = '18' },
+    (value: ReturnType<typeof response>) => {
+      const plan = fixturePlan(value, 'executionPlan') as ReturnType<typeof fixturePlan> & { leaseOwner: string }
+      plan.leaseOwner = 'worker-test-2'
+    },
     (value: ReturnType<typeof response>) => {
       fixturePlan(value, 'executionPlan').expiresAt = new Date(NOW + 1_000).toISOString()
     },

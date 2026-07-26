@@ -6,6 +6,9 @@ export type NftMintState =
   | 'delivered'
   | 'refunding'
   | 'refunded'
+  | 'cancelling'
+  | 'cancelled'
+  | 'failed'
   | 'expired'
   | 'needs_review'
 
@@ -16,6 +19,10 @@ export type MintExecutionPlan = {
   valueWei: string
   gasLimit: string
   maxFeePerGasWei: string
+  transactionNonce: string
+  leaseOwner: string
+  leaseExpiresAt: string
+  executionAttempt: number
   maximumExecutionCostWei: string
   createdAt: string
   expiresAt: string
@@ -28,6 +35,10 @@ export type TransferExecutionPlan = {
   valueWei: string
   gasLimit: string
   maxFeePerGasWei: string
+  transactionNonce: string
+  leaseOwner: string
+  leaseExpiresAt: string
+  executionAttempt: number
   amountWei?: string
   createdAt: string
   expiresAt: string
@@ -69,12 +80,25 @@ export type NftMintOrder = {
     tokenId: string
     blockNumber: string
     gasCostWei: string
+    transactionNonce: string
     confirmedAt: string
+  }
+  failedMint?: {
+    transactionHash: `0x${string}`
+    blockNumber: string
+    gasCostWei: string
+    transactionNonce: string
+    confirmedAt: string
+  }
+  cancellation?: {
+    requestedAt: string
+    reason: string
   }
   delivery?: {
     transactionHash: `0x${string}`
     blockNumber: string
     gasCostWei: string
+    transactionNonce: string
     confirmedAt: string
   }
   refund?: {
@@ -82,6 +106,7 @@ export type NftMintOrder = {
     amountWei: string
     blockNumber: string
     gasCostWei: string
+    transactionNonce: string
     confirmedAt: string
   }
   failure?: {
@@ -125,7 +150,20 @@ export type VerifiedMint = {
   to: `0x${string}`
   calldata: `0x${string}`
   valueWei: string
+  nonce: number
   tokenId: bigint
+  blockNumber: bigint
+  gasCostWei: bigint
+  confirmations: number
+}
+
+export type VerifiedFailedMint = {
+  transactionHash: `0x${string}`
+  from: `0x${string}`
+  to: `0x${string}`
+  calldata: `0x${string}`
+  valueWei: string
+  nonce: number
   blockNumber: bigint
   gasCostWei: bigint
   confirmations: number
@@ -137,6 +175,7 @@ export type VerifiedDelivery = {
   to: `0x${string}`
   calldata: `0x${string}`
   valueWei: string
+  nonce: number
   tokenId: bigint
   blockNumber: bigint
   gasCostWei: bigint
@@ -148,6 +187,7 @@ export type VerifiedRefund = {
   from: `0x${string}`
   to: `0x${string}`
   valueWei: string
+  nonce: number
   blockNumber: bigint
   gasCostWei: bigint
   confirmations: number

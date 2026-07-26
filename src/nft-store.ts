@@ -9,12 +9,31 @@ export interface NftMintStore {
   putIfAbsent(order: NftMintOrder): Promise<{ order: NftMintOrder; inserted: boolean }>
   update(order: NftMintOrder, expectedRevision: number): Promise<void>
   claimDeposit(order: NftMintOrder, expectedRevision: number, transactionHash: string): Promise<void>
+  claimExecutionLease(
+    order: NftMintOrder,
+    expectedRevision: number,
+    claimedAt: string,
+    action: 'mint' | 'deliver' | 'refund',
+  ): Promise<void>
+  completeExecutionLease(
+    order: NftMintOrder,
+    expectedRevision: number,
+    action: 'mint' | 'deliver' | 'refund',
+    completedAt: string,
+  ): Promise<void>
   list(states: NftMintState[]): Promise<NftMintOrder[]>
 }
 
 export class MemoryNftMintStore implements NftMintStore {
   private readonly orders = new Map<string, NftMintOrder>()
   private readonly deposits = new Map<string, string>()
+  private readonly executionLeases = new Map<string, {
+    leaseOwner: string
+    leaseExpiresAt: string
+    executionAttempt: number
+    transactionNonce: string
+    completedAt?: string
+  }>()
 
   private key(ownerId: string, externalId: string) {
     return `${ownerId}:${externalId}`
@@ -57,6 +76,83 @@ export class MemoryNftMintStore implements NftMintStore {
     }
   }
 
+  async claimExecutionLease(
+    order: NftMintOrder,
+    expectedRevision: number,
+    claimedAt: string,
+    action: 'mint' | 'deliver' | 'refund',
+  ) {
+    const plan = action === 'mint'
+      ? order.executionPlan
+      : action === 'deliver'
+        ? order.deliveryPlan
+        : order.refundPlan
+    if (!plan) throw new ConciergeError('NFT_EXECUTION_LEASE_INVALID', 'An execution plan is required.', 409)
+    const leaseId = `${order.orderId}:${action}:${plan.executionAttempt}`
+    for (const [existingLeaseId, lease] of this.executionLeases) {
+      if (
+        existingLeaseId.startsWith(`${order.orderId}:${action}:`)
+        && lease.leaseExpiresAt <= claimedAt
+      ) {
+        this.executionLeases.delete(existingLeaseId)
+      }
+    }
+    const active = [...this.executionLeases.entries()].find(
+      ([existingLeaseId, lease]) => (
+        existingLeaseId !== leaseId && !lease.completedAt && lease.leaseExpiresAt > claimedAt
+      ),
+    )
+    if (active) {
+      throw new ConciergeError(
+        'NFT_EXECUTION_LEASE_BUSY',
+        'Another treasury transaction currently owns the execution lease.',
+        409,
+      )
+    }
+    const duplicateNonce = [...this.executionLeases.entries()].find(
+      ([existingLeaseId, lease]) => existingLeaseId !== leaseId && lease.transactionNonce === plan.transactionNonce,
+    )
+    if (duplicateNonce) {
+      throw new ConciergeError(
+        'NFT_EXECUTION_NONCE_RESERVED',
+        'The pending Ethereum nonce is already reserved by another order.',
+        409,
+      )
+    }
+    if (this.executionLeases.has(leaseId)) {
+      throw new ConciergeError('NFT_EXECUTION_LEASE_CLAIMED', 'This order already has an execution lease.', 409)
+    }
+    this.executionLeases.set(leaseId, {
+      leaseOwner: plan.leaseOwner,
+      leaseExpiresAt: plan.leaseExpiresAt,
+      executionAttempt: plan.executionAttempt,
+      transactionNonce: plan.transactionNonce,
+    })
+    try {
+      await this.update(order, expectedRevision)
+    } catch (error) {
+      this.executionLeases.delete(leaseId)
+      throw error
+    }
+  }
+
+  async completeExecutionLease(
+    order: NftMintOrder,
+    expectedRevision: number,
+    action: 'mint' | 'deliver' | 'refund',
+    completedAt: string,
+  ) {
+    const candidates = [...this.executionLeases.entries()]
+      .filter(([leaseId]) => leaseId.startsWith(`${order.orderId}:${action}:`))
+      .sort(([, left], [, right]) => right.executionAttempt - left.executionAttempt)
+    const current = candidates[0]
+    if (!current) {
+      throw new ConciergeError('NFT_EXECUTION_LEASE_MISSING', 'Execution lease was not found.', 409)
+    }
+    await this.update(order, expectedRevision)
+    current[1].completedAt = completedAt
+  }
+
   async list(states: NftMintState[]) {
     const accepted = new Set(states)
     return [...this.orders.values()].filter(order => accepted.has(order.state)).map(order => structuredClone(order))
@@ -88,7 +184,20 @@ export class SqliteNftMintStore implements NftMintStore {
         external_id TEXT NOT NULL,
         UNIQUE (owner_id, external_id)
       );
+      CREATE TABLE IF NOT EXISTS nft_execution_leases (
+        lease_id TEXT PRIMARY KEY,
+        order_id TEXT NOT NULL,
+        owner_id TEXT NOT NULL,
+        external_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        lease_owner TEXT NOT NULL,
+        lease_expires_at TEXT NOT NULL,
+        execution_attempt INTEGER NOT NULL,
+        transaction_nonce TEXT NOT NULL UNIQUE,
+        completed_at TEXT
+      );
       CREATE INDEX IF NOT EXISTS idx_nft_mint_orders_state ON nft_mint_orders(state);
+      CREATE INDEX IF NOT EXISTS idx_nft_execution_leases_expiry ON nft_execution_leases(lease_expires_at);
     `)
   }
 
@@ -162,6 +271,137 @@ export class SqliteNftMintStore implements NftMintStore {
       )
       if (updated.changes !== 1) {
         throw new ConciergeError('NFT_ORDER_WRITE_CONFLICT', 'NFT mint order changed concurrently; reload before retrying.', 409)
+      }
+      this.database.exec('COMMIT')
+    } catch (error) {
+      this.database.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  async claimExecutionLease(
+    order: NftMintOrder,
+    expectedRevision: number,
+    claimedAt: string,
+    action: 'mint' | 'deliver' | 'refund',
+  ) {
+    const plan = action === 'mint'
+      ? order.executionPlan
+      : action === 'deliver'
+        ? order.deliveryPlan
+        : order.refundPlan
+    if (!plan || order.revision !== expectedRevision + 1) {
+      throw new ConciergeError('NFT_EXECUTION_LEASE_INVALID', 'An execution plan and valid revision are required.', 409)
+    }
+    const leaseId = `${order.orderId}:${action}:${plan.executionAttempt}`
+    this.database.exec('BEGIN IMMEDIATE')
+    try {
+      this.database.prepare(`
+        DELETE FROM nft_execution_leases
+        WHERE order_id = ? AND action = ? AND lease_expires_at <= ?
+      `).run(order.orderId, action, claimedAt)
+      const active = this.database.prepare(`
+        SELECT order_id FROM nft_execution_leases
+        WHERE lease_id <> ? AND completed_at IS NULL AND lease_expires_at > ?
+        LIMIT 1
+      `).get(leaseId, claimedAt)
+      if (active) {
+        throw new ConciergeError(
+          'NFT_EXECUTION_LEASE_BUSY',
+          'Another treasury transaction currently owns the execution lease.',
+          409,
+        )
+      }
+      const inserted = this.database.prepare(`
+        INSERT OR IGNORE INTO nft_execution_leases (
+          lease_id, order_id, owner_id, external_id, action, lease_owner,
+          lease_expires_at, execution_attempt, transaction_nonce
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        leaseId,
+        order.orderId,
+        order.ownerId,
+        order.externalId,
+        action,
+        plan.leaseOwner,
+        plan.leaseExpiresAt,
+        plan.executionAttempt,
+        plan.transactionNonce,
+      )
+      if (inserted.changes !== 1) {
+        const nonce = this.database.prepare(
+          'SELECT lease_id FROM nft_execution_leases WHERE transaction_nonce = ?',
+        ).get(plan.transactionNonce) as { lease_id: string } | undefined
+        throw new ConciergeError(
+          nonce && nonce.lease_id !== leaseId
+            ? 'NFT_EXECUTION_NONCE_RESERVED'
+            : 'NFT_EXECUTION_LEASE_CLAIMED',
+          nonce && nonce.lease_id !== leaseId
+            ? 'The pending Ethereum nonce is already reserved by another order.'
+            : 'This order already has an execution lease.',
+          409,
+        )
+      }
+      const updated = this.database.prepare(`
+        UPDATE nft_mint_orders
+        SET state = ?, revision = ?, document = ?
+        WHERE owner_id = ? AND external_id = ? AND revision = ?
+      `).run(
+        order.state,
+        order.revision,
+        JSON.stringify(order),
+        order.ownerId,
+        order.externalId,
+        expectedRevision,
+      )
+      if (updated.changes !== 1) {
+        throw new ConciergeError('NFT_ORDER_WRITE_CONFLICT', 'NFT mint order changed concurrently; reload before retrying.', 409)
+      }
+      this.database.exec('COMMIT')
+    } catch (error) {
+      this.database.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  async completeExecutionLease(
+    order: NftMintOrder,
+    expectedRevision: number,
+    action: 'mint' | 'deliver' | 'refund',
+    completedAt: string,
+  ) {
+    if (order.revision !== expectedRevision + 1) {
+      throw new ConciergeError('NFT_ORDER_WRITE_CONFLICT', 'NFT mint order revision is invalid.', 409)
+    }
+    this.database.exec('BEGIN IMMEDIATE')
+    try {
+      const updated = this.database.prepare(`
+        UPDATE nft_mint_orders
+        SET state = ?, revision = ?, document = ?
+        WHERE owner_id = ? AND external_id = ? AND revision = ?
+      `).run(
+        order.state,
+        order.revision,
+        JSON.stringify(order),
+        order.ownerId,
+        order.externalId,
+        expectedRevision,
+      )
+      if (updated.changes !== 1) {
+        throw new ConciergeError('NFT_ORDER_WRITE_CONFLICT', 'NFT mint order changed concurrently; reload before retrying.', 409)
+      }
+      const completed = this.database.prepare(`
+        UPDATE nft_execution_leases
+        SET completed_at = ?
+        WHERE lease_id = (
+          SELECT lease_id FROM nft_execution_leases
+          WHERE order_id = ? AND action = ? AND completed_at IS NULL
+          ORDER BY execution_attempt DESC
+          LIMIT 1
+        )
+      `).run(completedAt, order.orderId, action)
+      if (completed.changes !== 1) {
+        throw new ConciergeError('NFT_EXECUTION_LEASE_MISSING', 'Execution lease was not found.', 409)
       }
       this.database.exec('COMMIT')
     } catch (error) {

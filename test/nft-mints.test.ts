@@ -21,6 +21,7 @@ import type {
   BuiltMintTransaction,
   VerifiedDelivery,
   VerifiedDeposit,
+  VerifiedFailedMint,
   VerifiedMint,
   VerifiedRefund,
 } from '../src/nft-types.js'
@@ -33,6 +34,7 @@ const FUNDER = getAddress('0x5555555555555555555555555555555555555555')
 const CREATOR = getAddress('0x6666666666666666666666666666666666666666')
 const FEE_RECIPIENT = getAddress('0x7777777777777777777777777777777777777777')
 const DEPOSIT_HASH = `0x${'a'.repeat(64)}` as Hex
+const DEPOSIT_HASH_2 = `0x${'e'.repeat(64)}` as Hex
 const MINT_HASH = `0x${'b'.repeat(64)}` as Hex
 const DELIVERY_HASH = `0x${'c'.repeat(64)}` as Hex
 const REFUND_HASH = `0x${'d'.repeat(64)}` as Hex
@@ -72,6 +74,7 @@ const deliveryCalldata = encodeFunctionData({
 
 class FakeChain implements NftChainGateway {
   feePerGas = 30_000_000_000n
+  pendingNonceValue = 17
 
   transaction: BuiltMintTransaction = {
     target: SEADROP_1_0,
@@ -94,9 +97,22 @@ class FakeChain implements NftChainGateway {
     to: SEADROP_1_0,
     calldata: mintCalldata,
     valueWei: '10000000000000000',
+    nonce: 17,
     tokenId: 77n,
     blockNumber: 101n,
     gasCostWei: 2_000_000_000_000_000n,
+    confirmations: 2,
+  }
+
+  failedMint: VerifiedFailedMint = {
+    transactionHash: MINT_HASH,
+    from: TREASURY,
+    to: SEADROP_1_0,
+    calldata: mintCalldata,
+    valueWei: '10000000000000000',
+    nonce: 17,
+    blockNumber: 101n,
+    gasCostWei: 800_000_000_000_000n,
     confirmations: 2,
   }
 
@@ -106,6 +122,7 @@ class FakeChain implements NftChainGateway {
     to: NFT,
     calldata: deliveryCalldata,
     valueWei: '0',
+    nonce: 18,
     tokenId: 77n,
     blockNumber: 102n,
     gasCostWei: 500_000_000_000_000n,
@@ -117,6 +134,7 @@ class FakeChain implements NftChainGateway {
     from: TREASURY,
     to: REFUND,
     valueWei: '16592800000000000',
+    nonce: 19,
     blockNumber: 103n,
     gasCostWei: 600_000_000_000_000n,
     confirmations: 2,
@@ -130,8 +148,10 @@ class FakeChain implements NftChainGateway {
   }
   async estimateMintGas() { return 150_000n }
   async maxFeePerGas() { return this.feePerGas }
+  async pendingNonce() { return this.pendingNonceValue++ }
   async verifyDeposit() { return structuredClone(this.deposit) }
   async verifyMint() { return structuredClone(this.mint) }
+  async verifyFailedMint() { return structuredClone(this.failedMint) }
   async prepareDelivery() {
     return { target: NFT, calldata: deliveryCalldata, valueWei: '0' as const, gasLimit: 70_000n }
   }
@@ -522,27 +542,105 @@ test('simultaneous funding confirmations still claim a deposit only once', async
   assert.equal(results.filter(result => result.status === 'rejected').length, 1)
 })
 
+test('atomic execution lease allows only one active treasury mint worker', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'pocket-nft-lease-'))
+  const store = new SqliteNftMintStore(join(directory, 'orders.sqlite'))
+  const chain = new FakeChain()
+  const { app } = service(store, chain)
+  await app.create('agent-one', input())
+  await app.create('agent-one', input({ externalId: 'opensea-drop-0002' }))
+  await app.confirmFunding('agent-one', 'opensea-drop-0001', { depositTransactionHash: DEPOSIT_HASH })
+  chain.deposit.transactionHash = DEPOSIT_HASH_2
+  await app.confirmFunding('agent-one', 'opensea-drop-0002', { depositTransactionHash: DEPOSIT_HASH_2 })
+
+  const results = await Promise.allSettled([
+    app.prepareExecution('agent-one', 'opensea-drop-0001', 'worker-test-1'),
+    app.prepareExecution('agent-one', 'opensea-drop-0002', 'worker-test-2'),
+  ])
+  assert.equal(results.filter(result => result.status === 'fulfilled').length, 1)
+  const rejected = results.find(result => result.status === 'rejected')
+  assert.equal(
+    rejected?.status === 'rejected'
+      ? (rejected.reason as { code?: string }).code
+      : undefined,
+    'NFT_EXECUTION_LEASE_BUSY',
+  )
+  store.close()
+})
+
 test('execution plan respects mint and total-cost caps', async () => {
   const { app, chain } = service()
   await app.create('agent-one', input())
   await app.confirmFunding('agent-one', 'opensea-drop-0001', { depositTransactionHash: DEPOSIT_HASH })
-  const prepared = await app.prepareExecution('agent-one', 'opensea-drop-0001')
-  assert.equal(prepared.transaction.to, SEADROP_1_0)
-  assert.equal(prepared.transaction.from, TREASURY)
-  assert.equal(prepared.order.executionPlan?.calldataHash, keccak256(mintCalldata))
-
   chain.transaction.valueWei = '20000000000000001'
   await assert.rejects(
-    app.prepareExecution('agent-one', 'opensea-drop-0001'),
+    app.prepareExecution('agent-one', 'opensea-drop-0001', 'worker-test-1'),
     (error: unknown) => (error as { code?: string }).code === 'NFT_MINT_PRICE_LIMIT',
   )
+
+  chain.transaction.valueWei = '10000000000000000'
+  const prepared = await app.prepareExecution('agent-one', 'opensea-drop-0001', 'worker-test-1')
+  assert.equal(prepared.transaction.to, SEADROP_1_0)
+  assert.equal(prepared.transaction.from, TREASURY)
+  assert.equal(prepared.transaction.nonce, '17')
+  assert.equal(prepared.order.state, 'minting')
+  assert.equal(prepared.order.executionPlan?.leaseOwner, 'worker-test-1')
+  assert.equal(prepared.order.executionPlan?.calldataHash, keccak256(mintCalldata))
+})
+
+test('unfunded cancellation is terminal and accepts no refund transaction', async () => {
+  const { app } = service()
+  const created = await app.create('agent-one', input())
+  const cancelled = await app.cancel(
+    'agent-one',
+    created.order.externalId,
+    { reason: 'customer_cancelled' },
+  )
+  assert.equal(cancelled.state, 'cancelled')
+  assert.equal(cancelled.cancellation?.reason, 'customer_cancelled')
+  await assert.rejects(
+    app.prepareRefund('agent-one', created.order.externalId, 'worker-test-1'),
+    (error: unknown) => (error as { code?: string }).code === 'NFT_ORDER_STATE_INVALID',
+  )
+})
+
+test('funded pre-mint cancellation refunds execution capital without charging mint value', async () => {
+  const { app } = service()
+  await app.create('agent-one', input())
+  await app.confirmFunding('agent-one', 'opensea-drop-0001', { depositTransactionHash: DEPOSIT_HASH })
+  const cancelling = await app.cancel(
+    'agent-one',
+    'opensea-drop-0001',
+    { reason: 'customer_cancelled' },
+  )
+  assert.equal(cancelling.state, 'cancelling')
+  const refund = await app.prepareRefund('agent-one', 'opensea-drop-0001', 'worker-test-1')
+  assert.equal(refund.transaction.valueWei, '29092800000000000')
+  assert.equal(refund.transaction.to, REFUND)
+})
+
+test('verified failed mint gas is deducted before the immutable refund', async () => {
+  const { app } = service()
+  await app.create('agent-one', input())
+  await app.confirmFunding('agent-one', 'opensea-drop-0001', { depositTransactionHash: DEPOSIT_HASH })
+  await app.prepareExecution('agent-one', 'opensea-drop-0001', 'worker-test-1')
+  const failed = await app.recordFailedMint(
+    'agent-one',
+    'opensea-drop-0001',
+    { mintTransactionHash: MINT_HASH },
+  )
+  assert.equal(failed.state, 'failed')
+  assert.equal(failed.failedMint?.transactionNonce, '17')
+  await app.cancel('agent-one', 'opensea-drop-0001', { reason: 'mint_failed' })
+  const refund = await app.prepareRefund('agent-one', 'opensea-drop-0001', 'worker-test-1')
+  assert.equal(refund.transaction.valueWei, '28292800000000000')
 })
 
 test('records only a mint matching the immutable plan and exact NFT delivery', async () => {
   const { app, chain } = service()
   await app.create('agent-one', input())
   await app.confirmFunding('agent-one', 'opensea-drop-0001', { depositTransactionHash: DEPOSIT_HASH })
-  await app.prepareExecution('agent-one', 'opensea-drop-0001')
+  await app.prepareExecution('agent-one', 'opensea-drop-0001', 'worker-test-1')
 
   chain.mint.calldata = `${mintCalldata.slice(0, -2)}00` as Hex
   await assert.rejects(
@@ -554,7 +652,7 @@ test('records only a mint matching the immutable plan and exact NFT delivery', a
   const minted = await app.recordMint('agent-one', 'opensea-drop-0001', { mintTransactionHash: MINT_HASH })
   assert.equal(minted.state, 'delivering')
   assert.equal(minted.mint?.tokenId, '77')
-  const deliveryPlan = await app.prepareDelivery('agent-one', 'opensea-drop-0001')
+  const deliveryPlan = await app.prepareDelivery('agent-one', 'opensea-drop-0001', 'worker-test-1')
   assert.equal(deliveryPlan.transaction.to, NFT)
   assert.equal(deliveryPlan.transaction.valueWei, '0')
 
@@ -573,7 +671,7 @@ test('records only a mint matching the immutable plan and exact NFT delivery', a
   assert.equal(delivered.state, 'delivered')
   assert.equal(delivered.delivery?.transactionHash, DELIVERY_HASH)
 
-  const refundPlan = await app.prepareRefund('agent-one', 'opensea-drop-0001')
+  const refundPlan = await app.prepareRefund('agent-one', 'opensea-drop-0001', 'worker-test-1')
   assert.equal(refundPlan.order.state, 'refunding')
   assert.equal(refundPlan.transaction.to, REFUND)
   assert.equal(refundPlan.transaction.valueWei, '16592800000000000')
@@ -599,21 +697,22 @@ test('refund can be replanned only after an unbroadcast plan expires', async () 
   const { app, chain } = service(new MemoryNftMintStore(), new FakeChain(), () => now)
   await app.create('agent-one', input())
   await app.confirmFunding('agent-one', 'opensea-drop-0001', { depositTransactionHash: DEPOSIT_HASH })
-  await app.prepareExecution('agent-one', 'opensea-drop-0001')
+  await app.prepareExecution('agent-one', 'opensea-drop-0001', 'worker-test-1')
   await app.recordMint('agent-one', 'opensea-drop-0001', { mintTransactionHash: MINT_HASH })
-  await app.prepareDelivery('agent-one', 'opensea-drop-0001')
+  await app.prepareDelivery('agent-one', 'opensea-drop-0001', 'worker-test-1')
   await app.recordDelivery('agent-one', 'opensea-drop-0001', { deliveryTransactionHash: DELIVERY_HASH })
 
-  const first = await app.prepareRefund('agent-one', 'opensea-drop-0001')
+  const first = await app.prepareRefund('agent-one', 'opensea-drop-0001', 'worker-test-1')
   await assert.rejects(
-    app.prepareRefund('agent-one', 'opensea-drop-0001'),
+    app.prepareRefund('agent-one', 'opensea-drop-0001', 'worker-test-1'),
     (error: unknown) => (error as { code?: string }).code === 'NFT_ORDER_STATE_INVALID',
   )
 
   now = Date.parse(first.order.refundPlan!.expiresAt) + 1
   chain.refund.valueWei = '16592800000000000'
-  const replacement = await app.prepareRefund('agent-one', 'opensea-drop-0001')
+  const replacement = await app.prepareRefund('agent-one', 'opensea-drop-0001', 'worker-test-1')
   assert.notEqual(replacement.order.refundPlan?.planId, first.order.refundPlan?.planId)
+  assert.equal(replacement.transaction.nonce, first.transaction.nonce)
   assert.equal(replacement.order.state, 'refunding')
 })
 
@@ -623,12 +722,12 @@ test('refund reserves the assisted-wallet fee floor when RPC fees are unrealisti
   const { app } = service(new MemoryNftMintStore(), chain)
   await app.create('agent-one', input())
   await app.confirmFunding('agent-one', 'opensea-drop-0001', { depositTransactionHash: DEPOSIT_HASH })
-  await app.prepareExecution('agent-one', 'opensea-drop-0001')
+  await app.prepareExecution('agent-one', 'opensea-drop-0001', 'worker-test-1')
   await app.recordMint('agent-one', 'opensea-drop-0001', { mintTransactionHash: MINT_HASH })
-  await app.prepareDelivery('agent-one', 'opensea-drop-0001')
+  await app.prepareDelivery('agent-one', 'opensea-drop-0001', 'worker-test-1')
   await app.recordDelivery('agent-one', 'opensea-drop-0001', { deliveryTransactionHash: DELIVERY_HASH })
 
-  const refundPlan = await app.prepareRefund('agent-one', 'opensea-drop-0001')
+  const refundPlan = await app.prepareRefund('agent-one', 'opensea-drop-0001', 'worker-test-1')
   assert.equal(refundPlan.transaction.maxFeePerGasWei, '1500000000')
   assert.equal(refundPlan.transaction.valueWei, '17462200000000000')
 })

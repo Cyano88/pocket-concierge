@@ -87,6 +87,7 @@ function summarize(plan: ValidatedAssistedPlan, securityAction: string) {
     status: 'validated_not_broadcast',
     action: plan.action,
     externalId: plan.externalId,
+    orderId: plan.orderId,
     planId: plan.planId,
     chainId: plan.transaction.chainId,
     from: plan.transaction.from,
@@ -94,6 +95,7 @@ function summarize(plan: ValidatedAssistedPlan, securityAction: string) {
     valueWei: plan.transaction.valueWei,
     gasLimit: plan.transaction.gasLimit,
     maxFeePerGasWei: plan.transaction.maxFeePerGasWei,
+    nonce: plan.transaction.nonce,
     expiresAt: plan.expiresAt,
     securityAction: securityAction || 'safe',
   }
@@ -104,10 +106,17 @@ async function fetchPlan(
   externalId: string,
   action: AssistedNftAction,
   operatorKey: string,
+  workerId: string,
 ) {
   const response = await fetch(
     `${baseUrl}/v1/nft-mints/orders/${encodeURIComponent(externalId)}/${endpoint(action)}`,
-    { method: 'POST', headers: { 'X-Operator-Key': operatorKey } },
+    {
+      method: 'POST',
+      headers: {
+        'X-Operator-Key': operatorKey,
+        'X-Worker-Id': workerId,
+      },
+    },
   )
   const payload = await response.json().catch(() => ({ error: 'non_json_response' }))
   if (!response.ok) throw new Error(`Pocket rejected plan preparation (HTTP ${response.status}): ${JSON.stringify(payload)}`)
@@ -202,21 +211,59 @@ async function recordTransaction(
   )
 }
 
+async function recordFailedMint(
+  baseUrl: string,
+  externalId: string,
+  operatorKey: string,
+  hash: string,
+) {
+  const response = await fetch(
+    `${baseUrl}/v1/nft-mints/orders/${encodeURIComponent(externalId)}/failed`,
+    {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'X-Operator-Key': operatorKey,
+      },
+      body: JSON.stringify({ mintTransactionHash: hash }),
+    },
+  )
+  const payload = await response.json().catch(() => ({ error: 'non_json_response' }))
+  if (!response.ok) {
+    throw new Error(`Pocket rejected failed-mint recovery (HTTP ${response.status}): ${JSON.stringify(payload)}`)
+  }
+  console.log(JSON.stringify({
+    status: 'failed_mint_verified',
+    externalId,
+    transactionHash: hash,
+    next: 'Customer cancels the order, then the operator executes the exact refund plan.',
+  }, null, 2))
+}
+
 async function main() {
   const action = process.argv[2] as AssistedNftAction | undefined
   const externalId = process.argv[3]
   const execute = process.argv.includes('--execute')
   const hashIndex = process.argv.indexOf('--transaction-hash')
   const recoveryHash = hashIndex >= 0 ? process.argv[hashIndex + 1] : undefined
+  const failedHashIndex = process.argv.indexOf('--failed-transaction-hash')
+  const failedRecoveryHash = failedHashIndex >= 0 ? process.argv[failedHashIndex + 1] : undefined
   if (!action || !ACTIONS.has(action) || !externalId) {
     throw new Error(
       'Usage: npm run nft:worker -- <mint|deliver|refund> <externalId> '
-      + '[--execute | --transaction-hash 0x...]',
+      + '[--execute | --transaction-hash 0x... | --failed-transaction-hash 0x...]',
     )
   }
 
   const baseUrl = requiredEnv('POCKET_CONCIERGE_URL').replace(/\/$/, '')
   const operatorKey = requiredEnv('POCKET_CONCIERGE_NFT_OPERATOR_KEY')
+  if (failedRecoveryHash) {
+    if (action !== 'mint' || !/^0x[0-9a-fA-F]{64}$/.test(failedRecoveryHash)) {
+      throw new Error('--failed-transaction-hash requires the mint action and a full EVM transaction hash.')
+    }
+    await recordFailedMint(baseUrl, externalId, operatorKey, failedRecoveryHash)
+    return
+  }
   if (recoveryHash) {
     if (!/^0x[0-9a-fA-F]{64}$/.test(recoveryHash)) {
       throw new Error('--transaction-hash must be a full EVM transaction hash.')
@@ -225,12 +272,14 @@ async function main() {
     return
   }
   const treasuryAddress = requiredEnv('POCKET_CONCIERGE_NFT_TREASURY_ADDRESS')
+  const workerId = requiredEnv('POCKET_CONCIERGE_NFT_WORKER_ID')
   const maximumFeePerGasWei = requiredEnv('POCKET_CONCIERGE_NFT_WORKER_MAX_FEE_PER_GAS_WEI')
-  const raw = await fetchPlan(baseUrl, externalId, action, operatorKey)
+  const raw = await fetchPlan(baseUrl, externalId, action, operatorKey, workerId)
   const plan = validateAssistedNftPlan(raw, {
     action,
     externalId,
     treasuryAddress,
+    workerId,
     maximumFeePerGasWei,
   })
   const securityAction = scan(plan)

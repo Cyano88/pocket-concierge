@@ -16,11 +16,13 @@ export type AssistedTransaction = {
   valueWei: string
   gasLimit: string
   maxFeePerGasWei: string
+  nonce: string
 }
 
 export type ValidatedAssistedPlan = {
   action: AssistedNftAction
   externalId: string
+  orderId: string
   planId: string
   expiresAt: string
   transaction: AssistedTransaction
@@ -30,6 +32,7 @@ export type AssistedPlanConstraints = {
   action: AssistedNftAction
   externalId: string
   treasuryAddress: string
+  workerId: string
   maximumFeePerGasWei: string
   maximumMintGasLimit?: string
   maximumDeliveryGasLimit?: string
@@ -112,7 +115,7 @@ function planForAction(order: Record<string, unknown>, action: AssistedNftAction
 }
 
 function expectedState(action: AssistedNftAction) {
-  return action === 'mint' ? 'armed' : action === 'deliver' ? 'delivering' : 'refunding'
+  return action === 'mint' ? 'minting' : action === 'deliver' ? 'delivering' : 'refunding'
 }
 
 function expectedPlanPrefix(action: AssistedNftAction) {
@@ -138,6 +141,7 @@ export function validateAssistedNftPlan(
   const now = constraints.now ?? Date.now()
 
   if (order.externalId !== constraints.externalId) fail('Order externalId does not match the requested order.')
+  const orderId = text(order.orderId, 'execution.order.orderId')
   if (order.chainId !== 1 || transaction.chainId !== 1) fail('Only Ethereum mainnet chainId 1 is allowed.')
   if (order.state !== expectedState(constraints.action)) fail('Order state does not match the requested worker action.')
 
@@ -149,6 +153,7 @@ export function validateAssistedNftPlan(
   }
 
   const planId = text(plan.planId, 'plan.planId')
+  if (text(plan.orderId, 'plan.orderId') !== orderId) fail('Execution plan belongs to a different order.')
   if (!planId.startsWith(expectedPlanPrefix(constraints.action))) fail('Plan ID does not match the requested action.')
   const target = address(plan.target, 'plan.target')
   const to = address(transaction.to, 'execution.transaction.to')
@@ -176,6 +181,14 @@ export function validateAssistedNftPlan(
   if (maxFeePerGasWei > uint(constraints.maximumFeePerGasWei, 'maximumFeePerGasWei')) {
     fail('Plan maximum fee per gas exceeds the operator ceiling.')
   }
+  const nonce = uint(transaction.nonce, 'execution.transaction.nonce')
+  const planNonce = uint(plan.transactionNonce, 'plan.transactionNonce')
+  if (nonce !== planNonce) fail('Transaction nonce does not match the reserved execution nonce.')
+  const leaseOwner = text(plan.leaseOwner, 'plan.leaseOwner')
+  if (leaseOwner !== constraints.workerId) fail('Execution lease belongs to a different worker.')
+  const executionAttempt = uint(String(plan.executionAttempt), 'plan.executionAttempt')
+  if (executionAttempt < 1n) fail('Execution attempt must be positive.')
+  const leaseExpiresAt = text(plan.leaseExpiresAt, 'plan.leaseExpiresAt')
 
   const createdAt = text(plan.createdAt, 'plan.createdAt')
   const expiresAt = text(plan.expiresAt, 'plan.expiresAt')
@@ -191,6 +204,7 @@ export function validateAssistedNftPlan(
   if (expiresMs - now < (constraints.minimumRemainingMs ?? 5_000)) {
     fail('Plan is expired or too close to expiry for safe confirmation.')
   }
+  if (leaseExpiresAt !== expiresAt) fail('Execution lease and plan expiry must match.')
 
   const nftContract = address(order.nftContract, 'execution.order.nftContract')
   const refundAddress = address(order.refundAddress, 'execution.order.refundAddress')
@@ -216,6 +230,7 @@ export function validateAssistedNftPlan(
   return {
     action: constraints.action,
     externalId: constraints.externalId,
+    orderId,
     planId,
     expiresAt,
     transaction: {
@@ -226,6 +241,7 @@ export function validateAssistedNftPlan(
       valueWei: valueWei.toString(),
       gasLimit: gasLimit.toString(),
       maxFeePerGasWei: maxFeePerGasWei.toString(),
+      nonce: nonce.toString(),
     },
   }
 }

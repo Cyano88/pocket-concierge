@@ -105,6 +105,10 @@ the required confirmation count.
 - Separate order capability token and execution-operator key.
 - SQLite WAL persistence and optimistic revision checks.
 - Atomic global deposit-transaction claim.
+- Atomic global treasury execution lease with a reserved, receipt-verified Ethereum nonce.
+- Unfunded cancellation and funded pre-mint refund preparation.
+- Reverted-mint verification with exact failed-transaction gas deduction.
+- Isolated signer guard with its own SQLite nonce ledger; duplicate plans and nonces fail closed.
 - 64-KiB request limit and strict input allowlists.
 - EIP-3009 1-USDT X Layer challenge; no Permit2 advertising.
 - Exact calldata, value, sender, target, recipient, token ID, and transaction receipt verification.
@@ -114,15 +118,15 @@ the required confirmation count.
 
 These gates remain mandatory:
 
-1. Connect a hardened signer worker. The HTTP service must never receive a raw private key.
-2. Add failed-mint and pre-mint cancellation refund paths, including exact failed-transaction gas.
-3. Add an automatic scheduler with a transactional execution lease so two workers cannot mint twice.
-4. Verify recipient contract compatibility before using `safeTransferFrom`.
-5. Add an Ethereum mainnet fork suite; the controlled low-value live mint, delivery, and refund have passed.
-6. Independently reproduce the 1-USDT payment challenge and paid replay with OKX buyer tooling.
-7. Run incident tests for RPC disagreement, public-stage changes, replacement transactions, reorgs, gas
+1. Connect the hardened signer guard to the selected HSM/MPC broadcast backend. The HTTP service
+   must never receive a raw private key.
+2. Connect the lease-aware worker to an automatic scheduler after the signer adapter is selected.
+3. Verify recipient contract compatibility before using `safeTransferFrom`.
+4. Add an Ethereum mainnet fork suite; the controlled low-value live mint, delivery, and refund have passed.
+5. Independently reproduce the 1-USDT payment challenge and paid replay with OKX buyer tooling.
+6. Run incident tests for RPC disagreement, public-stage changes, replacement transactions, reorgs, gas
    spikes, sold-out stages, stuck delivery, and stuck refunds.
-8. Replace single-instance SQLite before horizontal scaling.
+7. Replace single-instance SQLite before horizontal scaling.
 
 Until the remaining gates pass, keep public order creation behind the pilot key. The completed
 privacy-safe proof may be published and reviewed independently.

@@ -7,12 +7,14 @@ import type { BuiltMintTransaction, CreateNftMintOrderInput, NftMintOrder } from
 
 const SAFE_ID = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{7,127}$/
 const COLLECTION_SLUG = /^[a-z0-9][a-z0-9-]{1,99}$/
+const LEASE_OWNER = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,79}$/
 const TX_HASH = /^0x[0-9a-fA-F]{64}$/
 const UINT = /^(0|[1-9][0-9]*)$/
 const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
 const MIN_ASSISTED_REFUND_MAX_FEE_PER_GAS_WEI = 1_500_000_000n
 const ASSISTED_REFUND_BALANCE_HEADROOM_PERCENT = 20n
 const PREVIEW_FALLBACK_MINT_GAS_LIMIT = 350_000n
+const CANCELLATION_REASONS = new Set(['customer_cancelled', 'mint_failed', 'order_expired'])
 
 export const NFT_MINT_SERVICE_FEE_ATOMIC = '1000000'
 export const NFT_MINT_ORDER_ROUTE = '/v1/okx/nft-mints/orders'
@@ -333,15 +335,18 @@ export class NftMintService {
         mint: {
           transactionHash: order.mint.transactionHash,
           gasCostWei: order.mint.gasCostWei,
+          transactionNonce: order.mint.transactionNonce,
         },
         delivery: {
           transactionHash: order.delivery.transactionHash,
           gasCostWei: order.delivery.gasCostWei,
+          transactionNonce: order.delivery.transactionNonce,
         },
         refund: {
           transactionHash: order.refund.transactionHash,
           amountWei: order.refund.amountWei,
           gasCostWei: order.refund.gasCostWei,
+          transactionNonce: order.refund.transactionNonce,
         },
         totalExecutionGasWei,
       },
@@ -424,12 +429,13 @@ export class NftMintService {
     return publicOrder(order)
   }
 
-  async prepareExecution(ownerId: string, externalId: string) {
+  async prepareExecution(ownerId: string, externalId: string, leaseOwnerRaw: string) {
     const order = await this.requireOrder(ownerId, externalId)
     if (order.state !== 'armed' || !order.deposit) {
       throw new ConciergeError('NFT_ORDER_NOT_ARMED', 'A confirmed Ethereum deposit is required before mint preparation.', 409)
     }
     const now = this.dependencies.now()
+    const leaseOwner = this.validateLeaseOwner(leaseOwnerRaw)
     if (Date.parse(order.expiresAt) <= now) {
       await this.expire(order)
       throw new ConciergeError('NFT_ORDER_EXPIRED', 'NFT mint order expired before execution.', 409)
@@ -454,6 +460,7 @@ export class NftMintService {
     ) {
       throw new ConciergeError('NFT_TOTAL_COST_LIMIT', 'Mint, delivery, and refund reserve exceed the funded spending cap.', 409)
     }
+    const transactionNonce = await this.pendingNonce(order.treasuryAddress)
     const createdAt = new Date(now).toISOString()
     const expiresAt = new Date(Math.min(
       now + this.dependencies.planTtlSeconds * 1000,
@@ -466,10 +473,15 @@ export class NftMintService {
       valueWei: transaction.valueWei,
       gasLimit: gasLimit.toString(),
       maxFeePerGasWei: maxFeePerGas.toString(),
+      transactionNonce: transactionNonce.toString(),
+      leaseOwner,
+      leaseExpiresAt: expiresAt,
+      executionAttempt: 1,
       maximumExecutionCostWei: maximumExecutionCost.toString(),
       expiresAt,
     }
     const expectedRevision = order.revision
+    order.state = 'minting'
     order.executionPlan = {
       planId: `nmp_${digest(planCore).slice(0, 32)}`,
       ...planCore,
@@ -477,7 +489,7 @@ export class NftMintService {
     }
     order.revision += 1
     order.updatedAt = createdAt
-    await this.dependencies.store.update(order, expectedRevision)
+    await this.dependencies.store.claimExecutionLease(order, expectedRevision, createdAt, 'mint')
     return {
       order: publicOrder(order),
       transaction: {
@@ -488,6 +500,7 @@ export class NftMintService {
         valueWei: transaction.valueWei,
         gasLimit: gasLimit.toString(),
         maxFeePerGasWei: maxFeePerGas.toString(),
+        nonce: transactionNonce.toString(),
       },
     }
   }
@@ -495,7 +508,7 @@ export class NftMintService {
   async recordMint(ownerId: string, externalId: string, raw: unknown) {
     const order = await this.requireOrder(ownerId, externalId)
     if (order.state === 'delivering' && order.mint) return publicOrder(order)
-    if (order.state !== 'armed' || !order.executionPlan) {
+    if (order.state !== 'minting' || !order.executionPlan) {
       throw new ConciergeError('NFT_ORDER_STATE_INVALID', 'A current execution plan is required before recording a mint.', 409)
     }
     const transactionHash = this.transactionHash(raw, 'mintTransactionHash')
@@ -509,6 +522,7 @@ export class NftMintService {
       || mint.to !== order.executionPlan.target
       || calldataDigest(mint.calldata) !== order.executionPlan.calldataHash
       || mint.valueWei !== order.executionPlan.valueWei
+      || mint.nonce.toString() !== order.executionPlan.transactionNonce
     ) {
       throw new ConciergeError('NFT_MINT_TRANSACTION_MISMATCH', 'Mint transaction does not match the approved execution plan.', 409)
     }
@@ -522,20 +536,107 @@ export class NftMintService {
       tokenId: mint.tokenId.toString(),
       blockNumber: mint.blockNumber.toString(),
       gasCostWei: mint.gasCostWei.toString(),
+      transactionNonce: mint.nonce.toString(),
       confirmedAt: new Date(this.dependencies.now()).toISOString(),
     }
     order.revision += 1
     order.updatedAt = order.mint.confirmedAt
+    await this.dependencies.store.completeExecutionLease(
+      order,
+      expectedRevision,
+      'mint',
+      order.mint.confirmedAt,
+    )
+    return publicOrder(order)
+  }
+
+  async recordFailedMint(ownerId: string, externalId: string, raw: unknown) {
+    const order = await this.requireOrder(ownerId, externalId)
+    if (order.state === 'failed' && order.failedMint) return publicOrder(order)
+    if (order.state !== 'minting' || !order.executionPlan) {
+      throw new ConciergeError(
+        'NFT_ORDER_STATE_INVALID',
+        'A claimed execution lease is required before recording a failed mint.',
+        409,
+      )
+    }
+    const transactionHash = this.transactionHash(raw, 'mintTransactionHash')
+    const failed = await this.dependencies.chain.verifyFailedMint(
+      transactionHash,
+      order.treasuryAddress,
+      order.executionPlan.target,
+      order.executionPlan.calldataHash as Hex,
+      BigInt(order.executionPlan.valueWei),
+      Number(order.executionPlan.transactionNonce),
+    )
+    if (failed.confirmations < this.dependencies.minimumConfirmations) {
+      throw new ConciergeError('NFT_MINT_CONFIRMING', 'Failed mint transaction has insufficient confirmations.', 409)
+    }
+    const expectedRevision = order.revision
+    const recordedAt = new Date(this.dependencies.now()).toISOString()
+    order.state = 'failed'
+    order.failedMint = {
+      transactionHash: failed.transactionHash,
+      blockNumber: failed.blockNumber.toString(),
+      gasCostWei: failed.gasCostWei.toString(),
+      transactionNonce: failed.nonce.toString(),
+      confirmedAt: recordedAt,
+    }
+    order.failure = {
+      code: 'NFT_MINT_REVERTED',
+      message: 'The reserved Ethereum mint transaction reverted; verified gas will be deducted before refund.',
+      recordedAt,
+    }
+    order.revision += 1
+    order.updatedAt = recordedAt
+    await this.dependencies.store.completeExecutionLease(order, expectedRevision, 'mint', recordedAt)
+    return publicOrder(order)
+  }
+
+  async cancel(ownerId: string, externalId: string, raw: unknown) {
+    const order = await this.requireOrder(ownerId, externalId)
+    if (order.state === 'cancelled' || order.state === 'refunding' || order.state === 'refunded') {
+      return publicOrder(order)
+    }
+    const suppliedReason = raw && typeof raw === 'object' && !Array.isArray(raw)
+      ? (raw as Record<string, unknown>).reason
+      : undefined
+    const reason = typeof suppliedReason === 'string' && suppliedReason
+      ? suppliedReason
+      : 'customer_cancelled'
+    if (!CANCELLATION_REASONS.has(reason)) {
+      throw new ConciergeError(
+        'NFT_CANCELLATION_INVALID',
+        'reason must be customer_cancelled, mint_failed, or order_expired.',
+      )
+    }
+    if (order.state === 'minting') {
+      throw new ConciergeError(
+        'NFT_EXECUTION_OUTCOME_REQUIRED',
+        'The reserved mint nonce must be recovered as successful or failed before cancellation.',
+        409,
+      )
+    }
+    if (order.state !== 'awaiting_funding' && order.state !== 'armed' && order.state !== 'failed') {
+      throw new ConciergeError('NFT_ORDER_STATE_INVALID', `Order cannot be cancelled while ${order.state}.`, 409)
+    }
+    const expectedRevision = order.revision
+    const requestedAt = new Date(this.dependencies.now()).toISOString()
+    order.cancellation = { requestedAt, reason }
+    order.state = order.deposit ? 'cancelling' : 'cancelled'
+    order.revision += 1
+    order.updatedAt = requestedAt
     await this.dependencies.store.update(order, expectedRevision)
     return publicOrder(order)
   }
 
-  async prepareDelivery(ownerId: string, externalId: string) {
+  async prepareDelivery(ownerId: string, externalId: string, leaseOwnerRaw: string) {
     const order = await this.requireOrder(ownerId, externalId)
     if (order.state !== 'delivering' || !order.mint) {
       throw new ConciergeError('NFT_ORDER_STATE_INVALID', 'A verified mint is required before delivery preparation.', 409)
     }
     const now = this.dependencies.now()
+    const leaseOwner = this.validateLeaseOwner(leaseOwnerRaw)
     const [transaction, maxFeePerGas] = await Promise.all([
       this.dependencies.chain.prepareDelivery(
         order.nftContract,
@@ -549,6 +650,7 @@ export class NftMintService {
     if (gasLimit > this.dependencies.deliveryGasLimit) {
       throw new ConciergeError('NFT_DELIVERY_GAS_LIMIT', 'NFT delivery exceeds the reserved gas limit.', 409)
     }
+    const transactionNonce = await this.pendingNonce(order.treasuryAddress)
     const createdAt = new Date(now).toISOString()
     const expiresAt = new Date(now + this.dependencies.planTtlSeconds * 1000).toISOString()
     const planCore = {
@@ -558,6 +660,10 @@ export class NftMintService {
       valueWei: '0',
       gasLimit: gasLimit.toString(),
       maxFeePerGasWei: maxFeePerGas.toString(),
+      transactionNonce: transactionNonce.toString(),
+      leaseOwner,
+      leaseExpiresAt: expiresAt,
+      executionAttempt: (order.deliveryPlan?.executionAttempt ?? 0) + 1,
       expiresAt,
     }
     const expectedRevision = order.revision
@@ -568,7 +674,7 @@ export class NftMintService {
     }
     order.revision += 1
     order.updatedAt = createdAt
-    await this.dependencies.store.update(order, expectedRevision)
+    await this.dependencies.store.claimExecutionLease(order, expectedRevision, createdAt, 'deliver')
     return {
       order: publicOrder(order),
       transaction: {
@@ -579,6 +685,7 @@ export class NftMintService {
         valueWei: '0',
         gasLimit: gasLimit.toString(),
         maxFeePerGasWei: maxFeePerGas.toString(),
+        nonce: transactionNonce.toString(),
       },
     }
   }
@@ -602,6 +709,7 @@ export class NftMintService {
       || delivery.to !== order.nftContract
       || calldataDigest(delivery.calldata) !== order.deliveryPlan.calldataHash
       || delivery.valueWei !== '0'
+      || delivery.nonce.toString() !== order.deliveryPlan.transactionNonce
       || delivery.tokenId !== BigInt(order.mint.tokenId)
       || delivery.confirmations < this.dependencies.minimumConfirmations
     ) {
@@ -613,36 +721,46 @@ export class NftMintService {
       transactionHash: delivery.transactionHash,
       blockNumber: delivery.blockNumber.toString(),
       gasCostWei: delivery.gasCostWei.toString(),
+      transactionNonce: delivery.nonce.toString(),
       confirmedAt: new Date(this.dependencies.now()).toISOString(),
     }
     order.revision += 1
     order.updatedAt = order.delivery.confirmedAt
-    await this.dependencies.store.update(order, expectedRevision)
+    await this.dependencies.store.completeExecutionLease(
+      order,
+      expectedRevision,
+      'deliver',
+      order.delivery.confirmedAt,
+    )
     return publicOrder(order)
   }
 
-  async prepareRefund(ownerId: string, externalId: string) {
+  async prepareRefund(ownerId: string, externalId: string, leaseOwnerRaw: string) {
     const order = await this.requireOrder(ownerId, externalId)
     const now = this.dependencies.now()
+    const leaseOwner = this.validateLeaseOwner(leaseOwnerRaw)
     const expiredRefundPlan = order.state === 'refunding'
       && order.refundPlan
       && Date.parse(order.refundPlan.expiresAt) <= now
-    if (
-      (order.state !== 'delivered' && !expiredRefundPlan)
-      || !order.deposit
-      || !order.mint
-      || !order.delivery
-    ) {
-      throw new ConciergeError('NFT_ORDER_STATE_INVALID', 'A delivered order with verified costs is required before refund preparation.', 409)
+    const deliveredOrder = order.state === 'delivered' && order.mint && order.delivery
+    const cancelledBeforeMint = order.state === 'cancelling' && !order.mint && !order.delivery
+    if ((!deliveredOrder && !cancelledBeforeMint && !expiredRefundPlan) || !order.deposit) {
+      throw new ConciergeError(
+        'NFT_ORDER_STATE_INVALID',
+        'A delivered order or funded pre-mint cancellation is required before refund preparation.',
+        409,
+      )
     }
     const maxFeePerGas = await this.dependencies.chain.maxFeePerGas()
     const percentageBufferedFee = (maxFeePerGas * 120n + 99n) / 100n
     const bufferedMaxFeePerGas = percentageBufferedFee > MIN_ASSISTED_REFUND_MAX_FEE_PER_GAS_WEI
       ? percentageBufferedFee
       : MIN_ASSISTED_REFUND_MAX_FEE_PER_GAS_WEI
-    const spentBeforeRefund = BigInt(order.executionPlan?.valueWei ?? '0')
-      + BigInt(order.mint.gasCostWei)
-      + BigInt(order.delivery.gasCostWei)
+    const spentBeforeRefund = deliveredOrder
+      ? BigInt(order.executionPlan?.valueWei ?? '0')
+        + BigInt(order.mint!.gasCostWei)
+        + BigInt(order.delivery!.gasCostWei)
+      : BigInt(order.failedMint?.gasCostWei ?? '0')
     const refundGasReserve = bufferedMaxFeePerGas * this.dependencies.refundGasLimit
     // OKX's assisted-wallet preflight applies its own fee allowance and rejects
     // transactions that sweep the balance exactly, even when the explicit gas
@@ -657,6 +775,9 @@ export class NftMintService {
       throw new ConciergeError('NFT_REFUND_BALANCE_INSUFFICIENT', 'No safely refundable ETH remains after execution and refund gas.', 409)
     }
     const amountWei = deposited - spentBeforeRefund - totalRefundReserve
+    const transactionNonce = expiredRefundPlan
+      ? Number(order.refundPlan!.transactionNonce)
+      : await this.pendingNonce(order.treasuryAddress)
     const createdAt = new Date(now).toISOString()
     const expiresAt = new Date(now + this.dependencies.planTtlSeconds * 1000).toISOString()
     const planCore = {
@@ -666,6 +787,10 @@ export class NftMintService {
       valueWei: amountWei.toString(),
       gasLimit: this.dependencies.refundGasLimit.toString(),
       maxFeePerGasWei: bufferedMaxFeePerGas.toString(),
+      transactionNonce: transactionNonce.toString(),
+      leaseOwner,
+      leaseExpiresAt: expiresAt,
+      executionAttempt: (order.refundPlan?.executionAttempt ?? 0) + 1,
       amountWei: amountWei.toString(),
       expiresAt,
     }
@@ -678,7 +803,7 @@ export class NftMintService {
     }
     order.revision += 1
     order.updatedAt = createdAt
-    await this.dependencies.store.update(order, expectedRevision)
+    await this.dependencies.store.claimExecutionLease(order, expectedRevision, createdAt, 'refund')
     return {
       order: publicOrder(order),
       transaction: {
@@ -689,6 +814,7 @@ export class NftMintService {
         valueWei: amountWei.toString(),
         gasLimit: this.dependencies.refundGasLimit.toString(),
         maxFeePerGasWei: bufferedMaxFeePerGas.toString(),
+        nonce: transactionNonce.toString(),
       },
     }
   }
@@ -710,6 +836,7 @@ export class NftMintService {
       refund.from !== order.treasuryAddress
       || refund.to !== order.refundAddress
       || refund.valueWei !== order.refundPlan.amountWei
+      || refund.nonce.toString() !== order.refundPlan.transactionNonce
       || refund.confirmations < this.dependencies.minimumConfirmations
     ) {
       throw new ConciergeError('NFT_REFUND_MISMATCH', 'Refund is not a confirmed exact transfer to the declared refund address.', 409)
@@ -721,11 +848,17 @@ export class NftMintService {
       amountWei: refund.valueWei,
       blockNumber: refund.blockNumber.toString(),
       gasCostWei: refund.gasCostWei.toString(),
+      transactionNonce: refund.nonce.toString(),
       confirmedAt: new Date(this.dependencies.now()).toISOString(),
     }
     order.revision += 1
     order.updatedAt = order.refund.confirmedAt
-    await this.dependencies.store.update(order, expectedRevision)
+    await this.dependencies.store.completeExecutionLease(
+      order,
+      expectedRevision,
+      'refund',
+      order.refund.confirmedAt,
+    )
     return publicOrder(order)
   }
 
@@ -748,6 +881,30 @@ export class NftMintService {
   private assertOrderLimit(input: CreateNftMintOrderInput) {
     if (BigInt(input.maxTotalCostWei) > this.dependencies.maximumOrderWei) {
       throw new ConciergeError('NFT_ORDER_LIMIT_EXCEEDED', 'maxTotalCostWei exceeds the configured pilot limit.', 409)
+    }
+  }
+
+  private validateLeaseOwner(raw: string) {
+    const leaseOwner = String(raw || '').trim()
+    if (!LEASE_OWNER.test(leaseOwner)) {
+      throw new ConciergeError(
+        'NFT_EXECUTION_LEASE_INVALID',
+        'X-Worker-Id must contain 3-80 safe characters.',
+        400,
+      )
+    }
+    return leaseOwner
+  }
+
+  private async pendingNonce(treasuryAddress: Address) {
+    try {
+      return await this.dependencies.chain.pendingNonce(treasuryAddress)
+    } catch {
+      throw new ConciergeError(
+        'NFT_EXECUTION_NONCE_UNAVAILABLE',
+        'Ethereum pending nonce is currently unavailable; no execution lease was claimed.',
+        503,
+      )
     }
   }
 
