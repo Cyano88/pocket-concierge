@@ -114,7 +114,7 @@ class FakeChain implements NftChainGateway {
     transactionHash: REFUND_HASH,
     from: TREASURY,
     to: REFUND,
-    valueWei: '16870000000000000',
+    valueWei: '16744000000000000',
     blockNumber: 103n,
     gasCostWei: 600_000_000_000_000n,
     confirmations: 2,
@@ -153,7 +153,11 @@ function input(overrides: Record<string, unknown> = {}) {
   }
 }
 
-function service(store: NftMintStore = new MemoryNftMintStore(), chain = new FakeChain()) {
+function service(
+  store: NftMintStore = new MemoryNftMintStore(),
+  chain = new FakeChain(),
+  now: () => number = () => NOW,
+) {
   return {
     app: new NftMintService({
       store,
@@ -165,7 +169,7 @@ function service(store: NftMintStore = new MemoryNftMintStore(), chain = new Fak
       refundGasLimit: 21_000n,
       maximumOrderWei: 100_000_000_000_000_000n,
       orderTokenSecret: 'test-only-order-token-secret-at-least-32-bytes',
-      now: () => NOW,
+      now,
     }),
     store,
     chain,
@@ -502,14 +506,38 @@ test('records only a mint matching the immutable plan and exact NFT delivery', a
   const refundPlan = await app.prepareRefund('agent-one', 'opensea-drop-0001')
   assert.equal(refundPlan.order.state, 'refunding')
   assert.equal(refundPlan.transaction.to, REFUND)
-  assert.equal(refundPlan.transaction.valueWei, '16870000000000000')
+  assert.equal(refundPlan.transaction.valueWei, '16744000000000000')
+  assert.equal(refundPlan.transaction.maxFeePerGasWei, '36000000000')
   const refunded = await app.recordRefund(
     'agent-one',
     'opensea-drop-0001',
     { refundTransactionHash: REFUND_HASH },
   )
   assert.equal(refunded.state, 'refunded')
-  assert.equal(refunded.refund?.amountWei, '16870000000000000')
+  assert.equal(refunded.refund?.amountWei, '16744000000000000')
+})
+
+test('refund can be replanned only after an unbroadcast plan expires', async () => {
+  let now = NOW
+  const { app, chain } = service(new MemoryNftMintStore(), new FakeChain(), () => now)
+  await app.create('agent-one', input())
+  await app.confirmFunding('agent-one', 'opensea-drop-0001', { depositTransactionHash: DEPOSIT_HASH })
+  await app.prepareExecution('agent-one', 'opensea-drop-0001')
+  await app.recordMint('agent-one', 'opensea-drop-0001', { mintTransactionHash: MINT_HASH })
+  await app.prepareDelivery('agent-one', 'opensea-drop-0001')
+  await app.recordDelivery('agent-one', 'opensea-drop-0001', { deliveryTransactionHash: DELIVERY_HASH })
+
+  const first = await app.prepareRefund('agent-one', 'opensea-drop-0001')
+  await assert.rejects(
+    app.prepareRefund('agent-one', 'opensea-drop-0001'),
+    (error: unknown) => (error as { code?: string }).code === 'NFT_ORDER_STATE_INVALID',
+  )
+
+  now = Date.parse(first.order.refundPlan!.expiresAt) + 1
+  chain.refund.valueWei = '16744000000000000'
+  const replacement = await app.prepareRefund('agent-one', 'opensea-drop-0001')
+  assert.notEqual(replacement.order.refundPlan?.planId, first.order.refundPlan?.planId)
+  assert.equal(replacement.order.state, 'refunding')
 })
 
 test('SQLite persistence preserves orders and globally unique deposit claims', async () => {

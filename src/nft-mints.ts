@@ -461,20 +461,29 @@ export class NftMintService {
 
   async prepareRefund(ownerId: string, externalId: string) {
     const order = await this.requireOrder(ownerId, externalId)
-    if (order.state !== 'delivered' || !order.deposit || !order.mint || !order.delivery) {
+    const now = this.dependencies.now()
+    const expiredRefundPlan = order.state === 'refunding'
+      && order.refundPlan
+      && Date.parse(order.refundPlan.expiresAt) <= now
+    if (
+      (order.state !== 'delivered' && !expiredRefundPlan)
+      || !order.deposit
+      || !order.mint
+      || !order.delivery
+    ) {
       throw new ConciergeError('NFT_ORDER_STATE_INVALID', 'A delivered order with verified costs is required before refund preparation.', 409)
     }
     const maxFeePerGas = await this.dependencies.chain.maxFeePerGas()
+    const bufferedMaxFeePerGas = (maxFeePerGas * 120n + 99n) / 100n
     const spentBeforeRefund = BigInt(order.executionPlan?.valueWei ?? '0')
       + BigInt(order.mint.gasCostWei)
       + BigInt(order.delivery.gasCostWei)
-    const refundGasReserve = maxFeePerGas * this.dependencies.refundGasLimit
+    const refundGasReserve = bufferedMaxFeePerGas * this.dependencies.refundGasLimit
     const deposited = BigInt(order.deposit.amountWei)
     if (spentBeforeRefund + refundGasReserve >= deposited) {
       throw new ConciergeError('NFT_REFUND_BALANCE_INSUFFICIENT', 'No safely refundable ETH remains after execution and refund gas.', 409)
     }
     const amountWei = deposited - spentBeforeRefund - refundGasReserve
-    const now = this.dependencies.now()
     const createdAt = new Date(now).toISOString()
     const expiresAt = new Date(now + this.dependencies.planTtlSeconds * 1000).toISOString()
     const planCore = {
@@ -483,7 +492,7 @@ export class NftMintService {
       calldataHash: calldataDigest('0x'),
       valueWei: amountWei.toString(),
       gasLimit: this.dependencies.refundGasLimit.toString(),
-      maxFeePerGasWei: maxFeePerGas.toString(),
+      maxFeePerGasWei: bufferedMaxFeePerGas.toString(),
       amountWei: amountWei.toString(),
       expiresAt,
     }
@@ -506,7 +515,7 @@ export class NftMintService {
         data: '0x',
         valueWei: amountWei.toString(),
         gasLimit: this.dependencies.refundGasLimit.toString(),
-        maxFeePerGasWei: maxFeePerGas.toString(),
+        maxFeePerGasWei: bufferedMaxFeePerGas.toString(),
       },
     }
   }
