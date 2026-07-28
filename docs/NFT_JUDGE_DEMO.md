@@ -1,9 +1,9 @@
 # Pocket NFT Mint & Deliver: 90-second judge demo
 
-## 0–15 seconds: state the job
+## 0-15 seconds: state the job
 
 “An agent receives one bounded mandate: mint one supported public SeaDrop NFT, deliver that exact
-token to the buyer’s wallet, and return unused ETH. The buyer pays a separate 1-USDT service fee on
+token to the buyer's wallet, and return unused ETH. The buyer pays a separate 1-USDT service fee on
 X Layer.”
 
 Open:
@@ -12,7 +12,7 @@ Open:
 https://pocket-concierge-docs-production.up.railway.app/#nft-proof
 ```
 
-## 15–45 seconds: inspect the public proof
+## 15-45 seconds: inspect the live public proof
 
 Open:
 
@@ -24,31 +24,34 @@ Point out:
 
 - `status: verified_complete`;
 - the immutable spending limits and manifest hash;
-- Nakamapes token ID `2845`;
-- the X Layer service-payment transaction;
-- separate Ethereum funding, mint, delivery, and refund transactions;
-- the exact refund amount;
+- Nakamapes token ID `2847`;
+- the separate X Layer service payment;
+- the Ethereum funding, mint, delivery, and refund transactions;
+- the exact refund amount and balanced execution accounting;
 - the recomputable `proofHash`;
 - the privacy inclusion and exclusion lists.
 
-## 45–65 seconds: verify delivery independently
+This proof is from the managed-policy pilot. The isolated worker could sign only the exact
+Ethereum-mainnet transaction plan approved by Pocket's deterministic policy checks.
+
+## 45-65 seconds: verify delivery independently
 
 Follow `explorers.nftOwner` from the proof. The NFT owner is the declared recipient:
 
 ```text
-0xa2ae0a3b3ed7b30ab049685a934de587a0f51d66
+0xa2Ae0A3B3eD7B30AB049685a934de587a0F51d66
 ```
 
-No Pocket database claim is required to trust the delivery result.
+The explorer verifies delivery independently; judges do not need to trust a Pocket database claim.
 
-## 65–80 seconds: explain the safety boundary
+## 65-80 seconds: explain the safety boundary
 
-“The service fee and execution capital are separate. The order fixes chain ID 1, collection,
-contract, quantity one, recipient, refund address, mint-price ceiling, total-cost ceiling, nonce-like
-external ID, and expiry before payment. The worker cannot change those fields, and the server
-re-verifies every Ethereum receipt.”
+“The service fee and execution capital are separate. Before payment, the order fixes Ethereum
+mainnet, collection, contract, quantity one, recipient, refund address, mint-price ceiling,
+total-cost ceiling, external ID, and expiry. A treasury-scoped nonce lease prevents two workers
+from executing the same funds, and every receipt is reverified on-chain.”
 
-## 80–90 seconds: show adoption
+## 80-90 seconds: show adoption
 
 Open:
 
@@ -56,6 +59,6 @@ Open:
 https://github.com/Cyano88/pocket-concierge/blob/master/examples/nft-mint-buyer.mjs
 ```
 
-“Another agent supplies one JSON order, confirms the exact 1-USDT x402 fee, receives the ETH funding
-instruction, and follows the returned state until delivery and refund. Public order creation remains
-pilot-gated while failure recovery is hardened; the completed proof is public now.”
+“Another agent submits one JSON order, confirms the exact 1-USDT x402 service fee, funds the
+returned one-order Ethereum address, and follows the machine-readable state through mint,
+delivery, and automatic return of unused capital.”
