@@ -29,12 +29,27 @@ const calldata = encodeFunctionData({
   functionName: 'mintPublic',
   args: [NFT, TREASURY, TREASURY, 1n],
 })
+const deliveryCalldata = encodeFunctionData({
+  abi: [{
+    type: 'function',
+    name: 'safeTransferFrom',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'from', type: 'address' },
+      { name: 'to', type: 'address' },
+      { name: 'tokenId', type: 'uint256' },
+    ],
+    outputs: [],
+  }],
+  functionName: 'safeTransferFrom',
+  args: [TREASURY, RECIPIENT, 42n],
+})
 
 function response(action: AssistedNftAction = 'mint') {
   const planField = action === 'mint' ? 'executionPlan' : action === 'deliver' ? 'deliveryPlan' : 'refundPlan'
   const state = action === 'mint' ? 'minting' : action === 'deliver' ? 'delivering' : 'refunding'
   const target = action === 'mint' ? SEADROP_1_0 : action === 'deliver' ? NFT : REFUND
-  const data = action === 'refund' ? '0x' : calldata
+  const data = action === 'refund' ? '0x' : action === 'deliver' ? deliveryCalldata : calldata
   const valueWei = action === 'mint' ? '10000000000000000' : action === 'refund' ? '5000000000000000' : '0'
   const gasLimit = action === 'mint' ? '180000' : action === 'deliver' ? '100000' : '21000'
   const plan = {
@@ -70,6 +85,9 @@ function response(action: AssistedNftAction = 'mint') {
         refundAddress: REFUND,
         maxMintPriceWei: '10000000000000000',
         maxTotalCostWei: '30000000000000000',
+        mint: {
+          tokenId: '42',
+        },
         [planField]: plan,
       },
       transaction: {
@@ -148,6 +166,51 @@ test('assisted worker rejects delivery value and inexact refund transfers', () =
   refund.execution.transaction.data = '0x00'
   fixturePlan(refund, 'refundPlan').calldataHash = keccak256('0x00')
   assert.throws(() => validate(refund, 'refund'))
+})
+
+test('assisted worker independently decodes mint and delivery calldata', () => {
+  const wrongQuantity = response()
+  wrongQuantity.execution.transaction.data = encodeFunctionData({
+    abi: [{
+      type: 'function',
+      name: 'mintPublic',
+      stateMutability: 'payable',
+      inputs: [
+        { name: 'nftContract', type: 'address' },
+        { name: 'feeRecipient', type: 'address' },
+        { name: 'minterIfNotPayer', type: 'address' },
+        { name: 'quantity', type: 'uint256' },
+      ],
+      outputs: [],
+    }],
+    functionName: 'mintPublic',
+    args: [NFT, TREASURY, TREASURY, 2n],
+  })
+  fixturePlan(wrongQuantity, 'executionPlan').calldataHash = keccak256(
+    wrongQuantity.execution.transaction.data,
+  )
+  assert.throws(() => validate(wrongQuantity))
+
+  const wrongRecipient = response('deliver')
+  wrongRecipient.execution.transaction.data = encodeFunctionData({
+    abi: [{
+      type: 'function',
+      name: 'safeTransferFrom',
+      stateMutability: 'nonpayable',
+      inputs: [
+        { name: 'from', type: 'address' },
+        { name: 'to', type: 'address' },
+        { name: 'tokenId', type: 'uint256' },
+      ],
+      outputs: [],
+    }],
+    functionName: 'safeTransferFrom',
+    args: [TREASURY, REFUND, 42n],
+  })
+  fixturePlan(wrongRecipient, 'deliveryPlan').calldataHash = keccak256(
+    wrongRecipient.execution.transaction.data,
+  )
+  assert.throws(() => validate(wrongRecipient, 'deliver'))
 })
 
 test('refund uses one dedicated native transfer and never the generic contract-call path', () => {

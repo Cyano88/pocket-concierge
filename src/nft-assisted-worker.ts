@@ -1,10 +1,25 @@
-import { getAddress, isAddress, keccak256, type Address, type Hex } from 'viem'
+import {
+  decodeFunctionData,
+  getAddress,
+  isAddress,
+  keccak256,
+  parseAbi,
+  type Address,
+  type Hex,
+} from 'viem'
 import { ConciergeError } from './errors.js'
 import { SEADROP_1_0 } from './nft-chain.js'
 
 const UINT = /^(0|[1-9][0-9]*)$/
 const HEX_DATA = /^0x(?:[0-9a-fA-F]{2})*$/
 const HASH = /^0x[0-9a-fA-F]{64}$/
+const ZERO_ADDRESS = getAddress('0x0000000000000000000000000000000000000000')
+const SEADROP_MINT_ABI = parseAbi([
+  'function mintPublic(address nftContract,address feeRecipient,address minterIfNotPayer,uint256 quantity) payable',
+])
+const ERC721_TRANSFER_ABI = parseAbi([
+  'function safeTransferFrom(address from,address to,uint256 tokenId)',
+])
 
 export type AssistedNftAction = 'mint' | 'deliver' | 'refund'
 
@@ -213,12 +228,51 @@ export function validateAssistedNftPlan(
 
   if (constraints.action === 'mint') {
     if (!sameAddress(target, SEADROP_1_0)) fail('Mint target is not the supported SeaDrop 1.0 contract.')
+    let decoded
+    try {
+      decoded = decodeFunctionData({ abi: SEADROP_MINT_ABI, data: data as Hex })
+    } catch {
+      fail('Mint calldata is not the supported SeaDrop mintPublic call.')
+    }
+    if (decoded.functionName !== 'mintPublic') fail('Only the SeaDrop mintPublic function is allowed.')
+    const [decodedNft, feeRecipient, minterIfNotPayer, quantity] = decoded.args
+    if (
+      !sameAddress(decodedNft, nftContract)
+      || sameAddress(feeRecipient, ZERO_ADDRESS)
+      || quantity !== 1n
+      || (
+        !sameAddress(minterIfNotPayer, ZERO_ADDRESS)
+        && !sameAddress(minterIfNotPayer, treasury)
+      )
+    ) {
+      fail('SeaDrop mint calldata does not match the immutable one-NFT treasury order.')
+    }
     if (valueWei > maxMintPriceWei) fail('Mint value exceeds the immutable mint-price ceiling.')
     const maximumExecutionCostWei = uint(plan.maximumExecutionCostWei, 'plan.maximumExecutionCostWei')
     if (maximumExecutionCostWei > maxTotalCostWei) fail('Execution cost exceeds the immutable order ceiling.')
   } else if (constraints.action === 'deliver') {
     if (!sameAddress(target, nftContract) || valueWei !== 0n) {
       fail('Delivery must call the immutable NFT contract with zero native value.')
+    }
+    const nftRecipient = address(order.nftRecipient, 'execution.order.nftRecipient')
+    const mint = object(order.mint, 'execution.order.mint')
+    const mintedTokenId = uint(mint.tokenId, 'execution.order.mint.tokenId')
+    let decoded
+    try {
+      decoded = decodeFunctionData({ abi: ERC721_TRANSFER_ABI, data: data as Hex })
+    } catch {
+      fail('Delivery calldata is not the supported ERC721 safeTransferFrom call.')
+    }
+    if (decoded.functionName !== 'safeTransferFrom') {
+      fail('Only the three-argument ERC721 safeTransferFrom function is allowed.')
+    }
+    const [decodedFrom, decodedRecipient, decodedTokenId] = decoded.args
+    if (
+      !sameAddress(decodedFrom, treasury)
+      || !sameAddress(decodedRecipient, nftRecipient)
+      || decodedTokenId !== mintedTokenId
+    ) {
+      fail('NFT delivery calldata does not match the immutable recipient and minted token.')
     }
   } else {
     const amountWei = uint(plan.amountWei, 'plan.amountWei')
