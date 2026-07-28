@@ -28,6 +28,7 @@ export class MemoryNftMintStore implements NftMintStore {
   private readonly orders = new Map<string, NftMintOrder>()
   private readonly deposits = new Map<string, string>()
   private readonly executionLeases = new Map<string, {
+    treasuryAddress: string
     leaseOwner: string
     leaseExpiresAt: string
     executionAttempt: number
@@ -110,7 +111,11 @@ export class MemoryNftMintStore implements NftMintStore {
       )
     }
     const duplicateNonce = [...this.executionLeases.entries()].find(
-      ([existingLeaseId, lease]) => existingLeaseId !== leaseId && lease.transactionNonce === plan.transactionNonce,
+      ([existingLeaseId, lease]) => (
+        existingLeaseId !== leaseId
+        && lease.treasuryAddress === order.treasuryAddress.toLowerCase()
+        && lease.transactionNonce === plan.transactionNonce
+      ),
     )
     if (duplicateNonce) {
       throw new ConciergeError(
@@ -123,6 +128,7 @@ export class MemoryNftMintStore implements NftMintStore {
       throw new ConciergeError('NFT_EXECUTION_LEASE_CLAIMED', 'This order already has an execution lease.', 409)
     }
     this.executionLeases.set(leaseId, {
+      treasuryAddress: order.treasuryAddress.toLowerCase(),
       leaseOwner: plan.leaseOwner,
       leaseExpiresAt: plan.leaseExpiresAt,
       executionAttempt: plan.executionAttempt,
@@ -160,6 +166,19 @@ export class MemoryNftMintStore implements NftMintStore {
 }
 
 type DocumentRow = { document: string }
+type ExecutionLeaseMigrationRow = {
+  lease_id: string
+  order_id: string
+  owner_id: string
+  external_id: string
+  action: string
+  lease_owner: string
+  lease_expires_at: string
+  execution_attempt: number
+  transaction_nonce: string
+  completed_at: string | null
+  document: string | null
+}
 
 export class SqliteNftMintStore implements NftMintStore {
   private readonly database: DatabaseSync
@@ -190,15 +209,93 @@ export class SqliteNftMintStore implements NftMintStore {
         owner_id TEXT NOT NULL,
         external_id TEXT NOT NULL,
         action TEXT NOT NULL,
+        treasury_address TEXT NOT NULL,
         lease_owner TEXT NOT NULL,
         lease_expires_at TEXT NOT NULL,
         execution_attempt INTEGER NOT NULL,
-        transaction_nonce TEXT NOT NULL UNIQUE,
-        completed_at TEXT
+        transaction_nonce TEXT NOT NULL,
+        completed_at TEXT,
+        UNIQUE (treasury_address, transaction_nonce)
       );
       CREATE INDEX IF NOT EXISTS idx_nft_mint_orders_state ON nft_mint_orders(state);
       CREATE INDEX IF NOT EXISTS idx_nft_execution_leases_expiry ON nft_execution_leases(lease_expires_at);
     `)
+    this.migrateExecutionLeaseNonceScope()
+  }
+
+  private migrateExecutionLeaseNonceScope() {
+    const columns = this.database.prepare(
+      'PRAGMA table_info(nft_execution_leases)',
+    ).all() as Array<{ name: string }>
+    if (columns.some(column => column.name === 'treasury_address')) return
+
+    const legacyRows = this.database.prepare(`
+      SELECT leases.*, orders.document
+      FROM nft_execution_leases AS leases
+      LEFT JOIN nft_mint_orders AS orders ON orders.owner_id = leases.owner_id
+        AND orders.external_id = leases.external_id
+    `).all() as ExecutionLeaseMigrationRow[]
+
+    this.database.exec('BEGIN IMMEDIATE')
+    try {
+      this.database.exec(`
+        DROP INDEX IF EXISTS idx_nft_execution_leases_expiry;
+        ALTER TABLE nft_execution_leases RENAME TO nft_execution_leases_legacy;
+        CREATE TABLE nft_execution_leases (
+          lease_id TEXT PRIMARY KEY,
+          order_id TEXT NOT NULL,
+          owner_id TEXT NOT NULL,
+          external_id TEXT NOT NULL,
+          action TEXT NOT NULL,
+          treasury_address TEXT NOT NULL,
+          lease_owner TEXT NOT NULL,
+          lease_expires_at TEXT NOT NULL,
+          execution_attempt INTEGER NOT NULL,
+          transaction_nonce TEXT NOT NULL,
+          completed_at TEXT,
+          UNIQUE (treasury_address, transaction_nonce)
+        );
+      `)
+      const insert = this.database.prepare(`
+        INSERT INTO nft_execution_leases (
+          lease_id, order_id, owner_id, external_id, action, treasury_address,
+          lease_owner, lease_expires_at, execution_attempt, transaction_nonce, completed_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `)
+      for (const row of legacyRows) {
+        let treasuryAddress = `legacy:${row.order_id}`
+        try {
+          const order = JSON.parse(row.document ?? '{}') as { treasuryAddress?: unknown }
+          if (typeof order.treasuryAddress === 'string' && /^0x[a-fA-F0-9]{40}$/.test(order.treasuryAddress)) {
+            treasuryAddress = order.treasuryAddress.toLowerCase()
+          }
+        } catch {
+          // Keep an isolated legacy scope when the historical order document is unavailable.
+        }
+        insert.run(
+          row.lease_id,
+          row.order_id,
+          row.owner_id,
+          row.external_id,
+          row.action,
+          treasuryAddress,
+          row.lease_owner,
+          row.lease_expires_at,
+          row.execution_attempt,
+          row.transaction_nonce,
+          row.completed_at,
+        )
+      }
+      this.database.exec(`
+        DROP TABLE nft_execution_leases_legacy;
+        CREATE INDEX idx_nft_execution_leases_expiry
+          ON nft_execution_leases(lease_expires_at);
+        COMMIT;
+      `)
+    } catch (error) {
+      this.database.exec('ROLLBACK')
+      throw error
+    }
   }
 
   async get(ownerId: string, externalId: string) {
@@ -314,15 +411,16 @@ export class SqliteNftMintStore implements NftMintStore {
       }
       const inserted = this.database.prepare(`
         INSERT OR IGNORE INTO nft_execution_leases (
-          lease_id, order_id, owner_id, external_id, action, lease_owner,
-          lease_expires_at, execution_attempt, transaction_nonce
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          lease_id, order_id, owner_id, external_id, action, treasury_address,
+          lease_owner, lease_expires_at, execution_attempt, transaction_nonce
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         leaseId,
         order.orderId,
         order.ownerId,
         order.externalId,
         action,
+        order.treasuryAddress.toLowerCase(),
         plan.leaseOwner,
         plan.leaseExpiresAt,
         plan.executionAttempt,
@@ -330,8 +428,12 @@ export class SqliteNftMintStore implements NftMintStore {
       )
       if (inserted.changes !== 1) {
         const nonce = this.database.prepare(
-          'SELECT lease_id FROM nft_execution_leases WHERE transaction_nonce = ?',
-        ).get(plan.transactionNonce) as { lease_id: string } | undefined
+          `SELECT lease_id FROM nft_execution_leases
+           WHERE treasury_address = ? AND transaction_nonce = ?`,
+        ).get(
+          order.treasuryAddress.toLowerCase(),
+          plan.transactionNonce,
+        ) as { lease_id: string } | undefined
         throw new ConciergeError(
           nonce && nonce.lease_id !== leaseId
             ? 'NFT_EXECUTION_NONCE_RESERVED'

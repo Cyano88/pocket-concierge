@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { mkdtempSync } from 'node:fs'
+import { DatabaseSync } from 'node:sqlite'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -589,6 +590,65 @@ test('atomic execution lease allows only one active treasury mint worker', async
       : undefined,
     'NFT_EXECUTION_LEASE_BUSY',
   )
+  store.close()
+})
+
+test('SQLite migrates legacy global nonce reservations to treasury-scoped reservations', () => {
+  const directory = mkdtempSync(join(tmpdir(), 'pocket-nft-nonce-migration-'))
+  const path = join(directory, 'orders.sqlite')
+  const legacy = new DatabaseSync(path)
+  legacy.exec(`
+    CREATE TABLE nft_execution_leases (
+      lease_id TEXT PRIMARY KEY,
+      order_id TEXT NOT NULL,
+      owner_id TEXT NOT NULL,
+      external_id TEXT NOT NULL,
+      action TEXT NOT NULL,
+      lease_owner TEXT NOT NULL,
+      lease_expires_at TEXT NOT NULL,
+      execution_attempt INTEGER NOT NULL,
+      transaction_nonce TEXT NOT NULL UNIQUE,
+      completed_at TEXT
+    );
+    INSERT INTO nft_execution_leases (
+      lease_id, order_id, owner_id, external_id, action, lease_owner,
+      lease_expires_at, execution_attempt, transaction_nonce, completed_at
+    ) VALUES (
+      'nmo_legacy:mint:1', 'nmo_legacy', 'agent-one', 'legacy-order', 'mint',
+      'legacy-worker', '2026-07-26T09:00:00.000Z', 1, '0', '2026-07-26T09:01:00.000Z'
+    );
+  `)
+  legacy.close()
+
+  const store = new SqliteNftMintStore(path)
+  const inspection = new DatabaseSync(path)
+  const columns = inspection.prepare(
+    'PRAGMA table_info(nft_execution_leases)',
+  ).all() as Array<{ name: string }>
+  assert.equal(columns.some(column => column.name === 'treasury_address'), true)
+  const migrated = inspection.prepare(
+    'SELECT treasury_address FROM nft_execution_leases WHERE lease_id = ?',
+  ).get('nmo_legacy:mint:1') as { treasury_address: string }
+  assert.equal(migrated.treasury_address, 'legacy:nmo_legacy')
+  assert.doesNotThrow(() => inspection.prepare(`
+    INSERT INTO nft_execution_leases (
+      lease_id, order_id, owner_id, external_id, action, treasury_address,
+      lease_owner, lease_expires_at, execution_attempt, transaction_nonce, completed_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    'nmo_managed:mint:1',
+    'nmo_managed',
+    'agent-one',
+    'managed-order',
+    'mint',
+    TREASURY.toLowerCase(),
+    'managed-worker',
+    '2026-07-26T10:01:00.000Z',
+    1,
+    '0',
+    null,
+  ))
+  inspection.close()
   store.close()
 })
 
