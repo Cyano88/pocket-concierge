@@ -332,6 +332,21 @@ const server = createServer(async (req, res) => {
         },
       }, payment.headers)
     }
+    if (method === 'GET' && url.pathname === '/v1/nft-mints/signer-config') {
+      if (!nftService) {
+        throw new ConciergeError('NFT_MINT_NOT_CONFIGURED', 'Pocket NFT Mint & Deliver is disabled.', 503)
+      }
+      requireNftOperator(req.headers['x-operator-key'] as string | undefined)
+      return json(res, 200, {
+        ok: true,
+        signerConfig: {
+          chainId: 1,
+          treasuryAddress: getAddress(nftTreasuryRaw),
+          access: nftPilotKey ? 'private-pilot' : 'public',
+          supportedActions: ['mint', 'deliver', 'refund'],
+        },
+      })
+    }
     if (method === 'GET' && url.pathname === NFT_MINT_PUBLIC_PROOF_ROUTE) {
       if (!nftService || !nftDemoExternalId || !nftDemoServicePaymentTx) {
         throw new ConciergeError('NFT_PROOF_NOT_CONFIGURED', 'The verified NFT pilot proof is not configured.', 503)

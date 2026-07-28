@@ -140,6 +140,21 @@ paths:
           description: Current order state and verified transaction evidence
         "401":
           description: Missing or invalid order access token
+  /v1/nft-mints/signer-config:
+    get:
+      operationId: verifyNftSignerConfiguration
+      summary: Authenticated read-only check that the API and isolated signer use the same treasury
+      parameters:
+        - in: header
+          name: X-Operator-Key
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Chain, treasury, access mode, and supported signer actions
+        "401":
+          description: Invalid execution-operator credential
   /v1/nft-mints/orders/{externalId}/funding:
     post:
       operationId: confirmNftMintFunding
