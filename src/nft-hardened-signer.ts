@@ -103,6 +103,24 @@ export class NftHardenedSigner {
     }
   }
 
+  findBroadcast(externalId: string, action: string) {
+    const row = this.database.prepare(`
+      SELECT plan_id, transaction_hash
+      FROM nft_signer_authorizations
+      WHERE external_id = ? AND action = ? AND state = 'broadcast' AND transaction_hash IS NOT NULL
+      ORDER BY broadcast_at DESC
+      LIMIT 1
+    `).get(externalId, action) as {
+      plan_id: string
+      transaction_hash: string
+    } | undefined
+    if (!row || !TRANSACTION_HASH.test(row.transaction_hash)) return null
+    return {
+      planId: row.plan_id,
+      transactionHash: row.transaction_hash as Hex,
+    }
+  }
+
   private reserve(plan: ValidatedAssistedPlan, signerAddress: Address, reservedAt: string) {
     try {
       this.database.prepare(`

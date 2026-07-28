@@ -211,6 +211,9 @@ claims one treasury transaction lease at a time, reserves and verifies the Ether
 delivery, and refund, supports unfunded cancellation, and deducts independently verified failed-mint
 gas before preparing an immutable refund. See
 [`docs/NFT_VPS_SIGNER.md`](./docs/NFT_VPS_SIGNER.md) for the hardened Ubuntu deployment.
+For the opt-in unattended migration using a separate policy-enforced Privy server wallet, see
+[`docs/MANAGED_NFT_SIGNER.md`](./docs/MANAGED_NFT_SIGNER.md). The interactive keystore remains the
+pilot default until the managed wallet completes its own controlled mainnet proof.
 
 The public proof reconciles the complete deposit into mint price, actual mint/delivery/refund gas,
 customer refund and disclosed `retainedSafetyHeadroomWei`. Its

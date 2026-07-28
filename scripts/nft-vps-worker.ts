@@ -7,6 +7,8 @@ import {
   validateAssistedNftPlan,
   type AssistedNftAction,
 } from '../src/nft-assisted-worker.js'
+import type { NftHardenedSignerBackend } from '../src/nft-hardened-signer.js'
+import { PrivyNftSignerBackend } from '../src/nft-privy-signer-backend.js'
 import { VpsNftSignerBackend } from '../src/nft-vps-signer-backend.js'
 
 const ACTIONS = new Set<AssistedNftAction>(['mint', 'deliver', 'refund'])
@@ -32,6 +34,10 @@ function requiredEnv(name: string) {
   const value = String(process.env[name] || '').trim()
   if (!value) throw new Error(`${name} is required.`)
   return value
+}
+
+function enabledEnv(name: string) {
+  return String(process.env[name] || '').trim().toLowerCase() === 'true'
 }
 
 function planEndpoint(action: AssistedNftAction) {
@@ -187,15 +193,74 @@ async function main() {
   const treasuryAddress = requiredEnv('POCKET_CONCIERGE_NFT_TREASURY_ADDRESS')
   const maximumFeePerGasWei = requiredEnv('POCKET_CONCIERGE_NFT_WORKER_MAX_FEE_PER_GAS_WEI')
   const constraints = { action, externalId, treasuryAddress, workerId, maximumFeePerGasWei }
+  const signerMode = String(process.env.POCKET_CONCIERGE_NFT_SIGNER_MODE || 'keystore')
+    .trim()
+    .toLowerCase()
+  const automaticExecution = enabledEnv('POCKET_CONCIERGE_NFT_AUTO_EXECUTE')
 
-  const password = await hidden('Keystore password: ')
-  const backend = await VpsNftSignerBackend.fromEncryptedKeystore(
-    readFileSync(requiredEnv('POCKET_CONCIERGE_NFT_KEYSTORE_PATH'), 'utf8'),
-    password,
-    { rpcUrl: requiredEnv('ETHEREUM_RPC_URL') },
-  )
+  let backend: NftHardenedSignerBackend
+  if (signerMode === 'keystore') {
+    if (automaticExecution) {
+      throw new Error('Automatic execution is forbidden with the interactive encrypted-keystore signer.')
+    }
+    const password = await hidden('Keystore password: ')
+    backend = await VpsNftSignerBackend.fromEncryptedKeystore(
+      readFileSync(requiredEnv('POCKET_CONCIERGE_NFT_KEYSTORE_PATH'), 'utf8'),
+      password,
+      { rpcUrl: requiredEnv('ETHEREUM_RPC_URL') },
+    )
+  } else if (signerMode === 'privy') {
+    if (
+      automaticExecution
+      && (
+        !requiredEnv('POCKET_CONCIERGE_NFT_PRIVY_POLICY_ID')
+        || !enabledEnv('POCKET_CONCIERGE_NFT_PRIVY_POLICY_CONFIRMED')
+      )
+    ) {
+      throw new Error('Automatic Privy execution requires an attached, confirmed wallet policy.')
+    }
+    backend = new PrivyNftSignerBackend({
+      appId: requiredEnv('POCKET_CONCIERGE_NFT_PRIVY_APP_ID'),
+      appSecret: requiredEnv('POCKET_CONCIERGE_NFT_PRIVY_APP_SECRET'),
+      walletId: requiredEnv('POCKET_CONCIERGE_NFT_PRIVY_WALLET_ID'),
+      walletAddress: treasuryAddress,
+      authorizationPrivateKey: requiredEnv('POCKET_CONCIERGE_NFT_PRIVY_AUTHORIZATION_PRIVATE_KEY'),
+      rpcUrl: requiredEnv('ETHEREUM_RPC_URL'),
+    })
+  } else {
+    throw new Error('POCKET_CONCIERGE_NFT_SIGNER_MODE must be keystore or privy.')
+  }
   if (getAddress(await backend.address()) !== getAddress(treasuryAddress)) {
-    throw new Error('Encrypted keystore address does not match the configured Pocket treasury.')
+    throw new Error('Signer address does not match the configured Pocket treasury.')
+  }
+  const signer = new NftHardenedSigner(
+    requiredEnv('POCKET_CONCIERGE_NFT_SIGNER_DB_PATH'),
+    backend,
+  )
+  const priorBroadcast = signer.findBroadcast(externalId, action)
+  if (priorBroadcast) {
+    try {
+      const verified = await submitForVerification(
+        baseUrl,
+        externalId,
+        action,
+        operatorKey,
+        priorBroadcast.transactionHash,
+      )
+      console.log(JSON.stringify({
+        status: 'ledger_recovered_and_verified',
+        action,
+        externalId,
+        planId: priorBroadcast.planId,
+        transactionHash: priorBroadcast.transactionHash,
+        orderState: verified?.order && typeof verified.order === 'object'
+          ? (verified.order as Record<string, unknown>).state
+          : undefined,
+      }, null, 2))
+      return
+    } finally {
+      signer.close()
+    }
   }
 
   const raw = await postJson(
@@ -218,18 +283,25 @@ async function main() {
     expiresAt: plan.expiresAt,
   }, null, 2))
 
-  const prompt = createInterface({ input: stdin, output: stdout })
-  try {
-    const confirmation = await prompt.question(`Type ${plan.planId} to sign and broadcast: `)
-    if (confirmation !== plan.planId) throw new Error('Execution cancelled: plan ID was not confirmed exactly.')
-  } finally {
-    prompt.close()
+  if (automaticExecution) {
+    console.log(JSON.stringify({
+      status: 'managed_policy_authorized',
+      signerMode,
+      policyId: requiredEnv('POCKET_CONCIERGE_NFT_PRIVY_POLICY_ID'),
+      planId: plan.planId,
+    }))
+  } else {
+    const prompt = createInterface({ input: stdin, output: stdout })
+    try {
+      const confirmation = await prompt.question(`Type ${plan.planId} to sign and broadcast: `)
+      if (confirmation !== plan.planId) {
+        throw new Error('Execution cancelled: plan ID was not confirmed exactly.')
+      }
+    } finally {
+      prompt.close()
+    }
   }
 
-  const signer = new NftHardenedSigner(
-    requiredEnv('POCKET_CONCIERGE_NFT_SIGNER_DB_PATH'),
-    backend,
-  )
   try {
     const result = await signer.execute(raw, constraints)
     const verified = await submitForVerification(

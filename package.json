@@ -16,6 +16,7 @@
     "nft:vps-keystore": "tsx scripts/nft-vps-keystore.ts",
     "nft:vps-api-check": "tsx scripts/nft-vps-api-check.ts",
     "nft:vps-worker": "tsx scripts/nft-vps-worker.ts",
+    "nft:managed-daemon": "tsx scripts/nft-managed-daemon.ts",
     "test": "node --import tsx --test test/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "build": "tsc -p tsconfig.json"
@@ -23,6 +24,7 @@
   "dependencies": {
     "@okxweb3/x402-core": "^0.1.0",
     "@okxweb3/x402-evm": "^0.2.1",
+    "@privy-io/node": "^0.28.0",
     "ethers": "^6.17.0",
     "tsx": "^4.23.0",
     "viem": "^2.55.8"

@@ -519,6 +519,30 @@ test('arms only after a matching, sufficiently confirmed Ethereum deposit', asyn
   assert.equal(armed.deposit?.transactionHash, DEPOSIT_HASH)
 })
 
+test('operator work queue exposes only the next privacy-limited serial action', async () => {
+  const { app } = service()
+  await app.create('agent-one', input())
+  await app.confirmFunding('agent-one', 'opensea-drop-0001', {
+    depositTransactionHash: DEPOSIT_HASH,
+  })
+  assert.deepEqual(await app.workQueue('agent-two'), [])
+  assert.deepEqual(await app.workQueue('agent-one'), [{
+    externalId: 'opensea-drop-0001',
+    state: 'armed',
+    action: 'mint',
+    recoveryExpected: false,
+    updatedAt: new Date(NOW).toISOString(),
+  }])
+
+  await app.prepareExecution('agent-one', 'opensea-drop-0001', 'hsm-worker-1')
+  const [work] = await app.workQueue('agent-one')
+  assert.equal(work?.state, 'minting')
+  assert.equal(work?.action, 'mint')
+  assert.equal(work?.recoveryExpected, true)
+  assert.equal('nftRecipient' in (work ?? {}), false)
+  assert.equal('refundAddress' in (work ?? {}), false)
+})
+
 test('one deposit transaction cannot arm two orders', async () => {
   const { app } = service()
   await app.create('agent-one', input())

@@ -285,6 +285,35 @@ export class NftMintService {
     return publicOrder(await this.requireOrder(ownerId, externalId))
   }
 
+  async workQueue(ownerId: string) {
+    const orders = await this.dependencies.store.list([
+      'armed',
+      'minting',
+      'delivering',
+      'delivered',
+      'cancelling',
+      'refunding',
+    ])
+    return orders
+      .filter(order => order.ownerId === ownerId)
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
+      .map(order => ({
+        externalId: order.externalId,
+        state: order.state,
+        action: order.state === 'armed' || order.state === 'minting'
+          ? 'mint'
+          : order.state === 'delivering'
+            ? 'deliver'
+            : 'refund',
+        recoveryExpected: (
+          (order.state === 'minting' && Boolean(order.executionPlan))
+          || (order.state === 'delivering' && Boolean(order.deliveryPlan))
+          || (order.state === 'refunding' && Boolean(order.refundPlan))
+        ),
+        updatedAt: order.updatedAt,
+      }))
+  }
+
   async publicProof(ownerId: string, externalId: string, servicePaymentTransactionHash: string) {
     if (!TX_HASH.test(servicePaymentTransactionHash)) {
       throw new ConciergeError('NFT_PROOF_NOT_CONFIGURED', 'The NFT service-payment proof is not configured.', 503)

@@ -347,6 +347,16 @@ const server = createServer(async (req, res) => {
         },
       })
     }
+    if (method === 'GET' && url.pathname === '/v1/nft-mints/work-queue') {
+      if (!nftService) {
+        throw new ConciergeError('NFT_MINT_NOT_CONFIGURED', 'Pocket NFT Mint & Deliver is disabled.', 503)
+      }
+      requireNftOperator(req.headers['x-operator-key'] as string | undefined)
+      return json(res, 200, {
+        ok: true,
+        work: await nftService.workQueue('okx-marketplace'),
+      })
+    }
     if (method === 'GET' && url.pathname === NFT_MINT_PUBLIC_PROOF_ROUTE) {
       if (!nftService || !nftDemoExternalId || !nftDemoServicePaymentTx) {
         throw new ConciergeError('NFT_PROOF_NOT_CONFIGURED', 'The verified NFT pilot proof is not configured.', 503)

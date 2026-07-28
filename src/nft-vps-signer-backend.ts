@@ -34,6 +34,29 @@ function safeNonce(value: string) {
   return Number(nonce)
 }
 
+export function assertSignedPlanEnvelope(
+  serialized: string,
+  expectedAddress: Address,
+  plan: ValidatedAssistedPlan,
+) {
+  const decoded = Transaction.from(serialized)
+  if (
+    decoded.type !== 0
+    || decoded.chainId !== 1n
+    || decoded.nonce !== safeNonce(plan.transaction.nonce)
+    || !decoded.from
+    || getAddress(decoded.from) !== expectedAddress
+    || !decoded.to
+    || ethersAddress(decoded.to) !== ethersAddress(plan.transaction.to)
+    || decoded.data.toLowerCase() !== plan.transaction.data.toLowerCase()
+    || decoded.value !== BigInt(plan.transaction.valueWei)
+    || decoded.gasLimit !== BigInt(plan.transaction.gasLimit)
+    || decoded.gasPrice !== BigInt(plan.transaction.maxFeePerGasWei)
+  ) {
+    invalid('Signed transaction differs from the validated Pocket execution plan.')
+  }
+}
+
 export class VpsNftSignerBackend implements NftHardenedSignerBackend {
   private readonly broadcaster: Broadcaster
   private cachedAddress?: Address
@@ -75,22 +98,7 @@ export class VpsNftSignerBackend implements NftHardenedSignerBackend {
       gasLimit: BigInt(plan.transaction.gasLimit),
       gasPrice: BigInt(plan.transaction.maxFeePerGasWei),
     })
-    const decoded = Transaction.from(serialized)
-    if (
-      decoded.type !== 0
-      || decoded.chainId !== 1n
-      || decoded.nonce !== safeNonce(plan.transaction.nonce)
-      || !decoded.from
-      || getAddress(decoded.from) !== expectedAddress
-      || !decoded.to
-      || ethersAddress(decoded.to) !== ethersAddress(plan.transaction.to)
-      || decoded.data.toLowerCase() !== plan.transaction.data.toLowerCase()
-      || decoded.value !== BigInt(plan.transaction.valueWei)
-      || decoded.gasLimit !== BigInt(plan.transaction.gasLimit)
-      || decoded.gasPrice !== BigInt(plan.transaction.maxFeePerGasWei)
-    ) {
-      invalid('Signed transaction differs from the validated Pocket execution plan.')
-    }
+    assertSignedPlanEnvelope(serialized, expectedAddress, plan)
     const transactionHash = await this.broadcaster.sendRawTransaction({
       serializedTransaction: serialized as Hex,
     })
