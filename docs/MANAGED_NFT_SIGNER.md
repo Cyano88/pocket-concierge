@@ -90,6 +90,7 @@ export POCKET_CONCIERGE_NFT_PRIVY_APP_SECRET='<app-secret>'
 export POCKET_CONCIERGE_NFT_PRIVY_WALLET_ID='<wallet-id>'
 export POCKET_CONCIERGE_NFT_PRIVY_AUTHORIZATION_PRIVATE_KEY='<base64-pkcs8-key>'
 export POCKET_CONCIERGE_NFT_PRIVY_POLICY_ID='<attached-owned-policy-id>'
+export POCKET_CONCIERGE_NFT_PRIVY_ADMIN_OWNER_ID='<offline-admin-owner-id>'
 export POCKET_CONCIERGE_NFT_PRIVY_POLICY_CONFIRMED='true'
 export POCKET_CONCIERGE_NFT_TREASURY_ADDRESS='<new-managed-wallet-address>'
 export POCKET_CONCIERGE_NFT_POLL_INTERVAL_MS='15000'
@@ -97,6 +98,14 @@ export POCKET_CONCIERGE_NFT_POLL_INTERVAL_MS='15000'
 
 Keep the file owned by `pocketsigner` with mode `600`. Keep the existing Pocket API URL, operator
 key, worker ID, signer database, fee ceiling and Ethereum RPC variables.
+
+Before changing the API treasury, verify the live wallet ownership, signer override, policy denial
+and sign-only path. This creates no broadcast and uses a deliberately unreachable nonce:
+
+```bash
+source /opt/pocket-signer/secrets/worker.env
+npm run nft:privy-policy-check
+```
 
 ## 4. Controlled migration
 

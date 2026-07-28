@@ -15,6 +15,7 @@
     "nft:worker": "tsx scripts/nft-assisted-worker.ts",
     "nft:vps-keystore": "tsx scripts/nft-vps-keystore.ts",
     "nft:vps-api-check": "tsx scripts/nft-vps-api-check.ts",
+    "nft:privy-policy-check": "tsx scripts/nft-privy-policy-check.ts",
     "nft:vps-worker": "tsx scripts/nft-vps-worker.ts",
     "nft:managed-daemon": "tsx scripts/nft-managed-daemon.ts",
     "test": "node --import tsx --test test/*.test.ts",
