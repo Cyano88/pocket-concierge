@@ -139,10 +139,10 @@ const nftService = nftConfigComplete
       ),
       planTtlSeconds: configuredInteger(
         process.env.POCKET_CONCIERGE_NFT_PLAN_TTL_SECONDS,
-        30,
+        300,
         'POCKET_CONCIERGE_NFT_PLAN_TTL_SECONDS',
         10,
-        120,
+        600,
       ),
       deliveryGasLimit: configuredBigInt(
         process.env.POCKET_CONCIERGE_NFT_DELIVERY_GAS_LIMIT,

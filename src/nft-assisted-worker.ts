@@ -213,7 +213,7 @@ export function validateAssistedNftPlan(
     fail('Plan timestamps are invalid.')
   }
   if (createdMs > now + 5_000) fail('Plan creation time is unexpectedly in the future.')
-  if (expiresMs - createdMs > (constraints.maximumPlanLifetimeMs ?? 120_000)) {
+  if (expiresMs - createdMs > (constraints.maximumPlanLifetimeMs ?? 600_000)) {
     fail('Plan lifetime exceeds the worker ceiling.')
   }
   if (expiresMs - now < (constraints.minimumRemainingMs ?? 5_000)) {
