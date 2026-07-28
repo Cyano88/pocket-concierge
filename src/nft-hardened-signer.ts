@@ -29,13 +29,16 @@ export class NftHardenedSigner {
     this.database.exec(`
       PRAGMA journal_mode = WAL;
       PRAGMA busy_timeout = 5000;
+    `)
+    this.migrateLegacyAuthorizationSchema()
+    this.database.exec(`
       CREATE TABLE IF NOT EXISTS nft_signer_authorizations (
         plan_id TEXT PRIMARY KEY,
         external_id TEXT NOT NULL,
         action TEXT NOT NULL,
         chain_id INTEGER NOT NULL,
         signer_address TEXT NOT NULL,
-        transaction_nonce TEXT NOT NULL UNIQUE,
+        transaction_nonce TEXT NOT NULL,
         target TEXT NOT NULL,
         calldata_hash TEXT NOT NULL,
         value_wei TEXT NOT NULL,
@@ -45,8 +48,66 @@ export class NftHardenedSigner {
         state TEXT NOT NULL,
         transaction_hash TEXT,
         reserved_at TEXT NOT NULL,
-        broadcast_at TEXT
+        broadcast_at TEXT,
+        UNIQUE (signer_address, transaction_nonce)
       );
+    `)
+  }
+
+  private migrateLegacyAuthorizationSchema() {
+    const table = this.database.prepare(`
+      SELECT name
+      FROM sqlite_master
+      WHERE type = 'table' AND name = 'nft_signer_authorizations'
+    `).get() as { name: string } | undefined
+    if (!table) return
+
+    const indexes = this.database.prepare(`
+      PRAGMA index_list(nft_signer_authorizations)
+    `).all() as Array<{ name: string; unique: number }>
+    const hasGlobalNonceUniqueness = indexes.some(index => {
+      if (index.unique !== 1) return false
+      const columns = this.database.prepare(
+        `PRAGMA index_info(${JSON.stringify(index.name)})`,
+      ).all() as Array<{ name: string }>
+      return columns.length === 1 && columns[0]?.name === 'transaction_nonce'
+    })
+    if (!hasGlobalNonceUniqueness) return
+
+    this.database.exec(`
+      BEGIN IMMEDIATE;
+      ALTER TABLE nft_signer_authorizations RENAME TO nft_signer_authorizations_legacy;
+      CREATE TABLE nft_signer_authorizations (
+        plan_id TEXT PRIMARY KEY,
+        external_id TEXT NOT NULL,
+        action TEXT NOT NULL,
+        chain_id INTEGER NOT NULL,
+        signer_address TEXT NOT NULL,
+        transaction_nonce TEXT NOT NULL,
+        target TEXT NOT NULL,
+        calldata_hash TEXT NOT NULL,
+        value_wei TEXT NOT NULL,
+        gas_limit TEXT NOT NULL,
+        max_fee_per_gas_wei TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        state TEXT NOT NULL,
+        transaction_hash TEXT,
+        reserved_at TEXT NOT NULL,
+        broadcast_at TEXT,
+        UNIQUE (signer_address, transaction_nonce)
+      );
+      INSERT INTO nft_signer_authorizations (
+        plan_id, external_id, action, chain_id, signer_address, transaction_nonce,
+        target, calldata_hash, value_wei, gas_limit, max_fee_per_gas_wei,
+        expires_at, state, transaction_hash, reserved_at, broadcast_at
+      )
+      SELECT
+        plan_id, external_id, action, chain_id, signer_address, transaction_nonce,
+        target, calldata_hash, value_wei, gas_limit, max_fee_per_gas_wei,
+        expires_at, state, transaction_hash, reserved_at, broadcast_at
+      FROM nft_signer_authorizations_legacy;
+      DROP TABLE nft_signer_authorizations_legacy;
+      COMMIT;
     `)
   }
 

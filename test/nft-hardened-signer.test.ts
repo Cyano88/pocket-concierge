@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import test from 'node:test'
 import { encodeFunctionData, getAddress, keccak256, type Hex } from 'viem'
 import { SEADROP_1_0 } from '../src/nft-chain.js'
@@ -128,4 +129,85 @@ test('isolated signer refuses a different plan that reuses the reserved nonce', 
     (error: unknown) => (error as { code?: string }).code === 'NFT_SIGNER_AUTHORIZATION_REUSED',
   )
   signer.close()
+})
+
+test('isolated signer migrates legacy global nonce reservations to signer-scoped reservations', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'pocket-nft-signer-migration-'))
+  const databasePath = join(directory, 'signer.sqlite')
+  const oldTreasury = getAddress('0x3333333333333333333333333333333333333333')
+  const database = new DatabaseSync(databasePath)
+  database.exec(`
+    CREATE TABLE nft_signer_authorizations (
+      plan_id TEXT PRIMARY KEY,
+      external_id TEXT NOT NULL,
+      action TEXT NOT NULL,
+      chain_id INTEGER NOT NULL,
+      signer_address TEXT NOT NULL,
+      transaction_nonce TEXT NOT NULL UNIQUE,
+      target TEXT NOT NULL,
+      calldata_hash TEXT NOT NULL,
+      value_wei TEXT NOT NULL,
+      gas_limit TEXT NOT NULL,
+      max_fee_per_gas_wei TEXT NOT NULL,
+      expires_at TEXT NOT NULL,
+      state TEXT NOT NULL,
+      transaction_hash TEXT,
+      reserved_at TEXT NOT NULL,
+      broadcast_at TEXT
+    );
+  `)
+  database.prepare(`
+    INSERT INTO nft_signer_authorizations (
+      plan_id, external_id, action, chain_id, signer_address, transaction_nonce,
+      target, calldata_hash, value_wei, gas_limit, max_fee_per_gas_wei,
+      expires_at, state, transaction_hash, reserved_at, broadcast_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    'nmp_legacy_signer_001',
+    'legacy-mint-001',
+    'mint',
+    1,
+    oldTreasury,
+    '17',
+    SEADROP_1_0,
+    keccak256(calldata),
+    '10000000000000000',
+    '180000',
+    '30000000000',
+    new Date(NOW + 30_000).toISOString(),
+    'broadcast',
+    TRANSACTION_HASH,
+    new Date(NOW - 1_000).toISOString(),
+    new Date(NOW).toISOString(),
+  )
+  database.close()
+
+  let broadcasts = 0
+  const backend: NftHardenedSignerBackend = {
+    async address() { return TREASURY },
+    async signAndBroadcast() {
+      broadcasts += 1
+      return { transactionHash: TRANSACTION_HASH }
+    },
+  }
+  const signer = new NftHardenedSigner(databasePath, backend, () => NOW)
+  const result = await signer.execute(response(), constraints())
+  assert.equal(result.transactionHash, TRANSACTION_HASH)
+  assert.equal(broadcasts, 1)
+  signer.close()
+
+  const migrated = new DatabaseSync(databasePath)
+  const rows = migrated.prepare(`
+    SELECT signer_address, transaction_nonce
+    FROM nft_signer_authorizations
+    ORDER BY signer_address
+  `).all().map(row => ({ ...row })) as Array<{
+    signer_address: string
+    transaction_nonce: string
+  }>
+  assert.deepEqual(rows, [
+    { signer_address: TREASURY, transaction_nonce: '17' },
+    { signer_address: oldTreasury, transaction_nonce: '17' },
+  ].sort((left, right) => left.signer_address.localeCompare(right.signer_address)))
+  migrated.close()
 })
