@@ -672,6 +672,88 @@ test('execution plan respects mint and total-cost caps', async () => {
   assert.equal(prepared.order.executionPlan?.calldataHash, keccak256(mintCalldata))
 })
 
+test('active mint plan replays idempotently only to its lease owner', async () => {
+  const { app } = service()
+  await app.create('agent-one', input())
+  await app.confirmFunding('agent-one', 'opensea-drop-0001', {
+    depositTransactionHash: DEPOSIT_HASH,
+  })
+  const first = await app.prepareExecution('agent-one', 'opensea-drop-0001', 'worker-test-1')
+  const replay = await app.prepareExecution('agent-one', 'opensea-drop-0001', 'worker-test-1')
+  assert.equal(replay.order.executionPlan?.planId, first.order.executionPlan?.planId)
+  assert.deepEqual(replay.transaction, first.transaction)
+  assert.equal(replay.order.revision, first.order.revision)
+  await assert.rejects(
+    app.prepareExecution('agent-one', 'opensea-drop-0001', 'worker-test-2'),
+    (error: unknown) => (error as { code?: string }).code === 'NFT_EXECUTION_LEASE_CLAIMED',
+  )
+})
+
+test('expired unbroadcast mint plan recovers to armed after grace and unchanged nonce', async () => {
+  let currentTime = NOW
+  const { app, chain } = service(
+    new MemoryNftMintStore(),
+    new FakeChain(),
+    () => currentTime,
+  )
+  await app.create('agent-one', input())
+  await app.confirmFunding('agent-one', 'opensea-drop-0001', {
+    depositTransactionHash: DEPOSIT_HASH,
+  })
+  const prepared = await app.prepareExecution(
+    'agent-one',
+    'opensea-drop-0001',
+    'worker-test-1',
+  )
+  await assert.rejects(
+    app.recoverExpiredUnbroadcastMint('agent-one', 'opensea-drop-0001', 'worker-test-1'),
+    (error: unknown) => (error as { code?: string }).code === 'NFT_MINT_RECOVERY_TOO_EARLY',
+  )
+  currentTime = Date.parse(prepared.order.executionPlan!.expiresAt) + 60_001
+  chain.pendingNonceValue = Number(prepared.transaction.nonce)
+  const recovered = await app.recoverExpiredUnbroadcastMint(
+    'agent-one',
+    'opensea-drop-0001',
+    'worker-test-1',
+  )
+  assert.equal(recovered.recovered, true)
+  assert.equal(recovered.releasedPlanId, prepared.order.executionPlan?.planId)
+  assert.equal(recovered.order.state, 'armed')
+  assert.equal(recovered.order.executionPlan, undefined)
+
+  chain.pendingNonceValue = Number(prepared.transaction.nonce)
+  const replacement = await app.prepareExecution(
+    'agent-one',
+    'opensea-drop-0001',
+    'worker-test-1',
+  )
+  assert.equal(replacement.transaction.nonce, prepared.transaction.nonce)
+})
+
+test('expired mint recovery refuses an advanced Ethereum nonce', async () => {
+  let currentTime = NOW
+  const { app, chain } = service(
+    new MemoryNftMintStore(),
+    new FakeChain(),
+    () => currentTime,
+  )
+  await app.create('agent-one', input())
+  await app.confirmFunding('agent-one', 'opensea-drop-0001', {
+    depositTransactionHash: DEPOSIT_HASH,
+  })
+  const prepared = await app.prepareExecution(
+    'agent-one',
+    'opensea-drop-0001',
+    'worker-test-1',
+  )
+  currentTime = Date.parse(prepared.order.executionPlan!.expiresAt) + 60_001
+  chain.pendingNonceValue = Number(prepared.transaction.nonce) + 1
+  await assert.rejects(
+    app.recoverExpiredUnbroadcastMint('agent-one', 'opensea-drop-0001', 'worker-test-1'),
+    (error: unknown) => (error as { code?: string }).code === 'NFT_EXECUTION_OUTCOME_REQUIRED',
+  )
+})
+
 test('unfunded cancellation is terminal and accepts no refund transaction', async () => {
   const { app } = service()
   const created = await app.create('agent-one', input())

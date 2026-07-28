@@ -182,6 +182,28 @@ export class NftHardenedSigner {
     }
   }
 
+  findAuthorization(externalId: string, action: string) {
+    const row = this.database.prepare(`
+      SELECT plan_id, state, transaction_hash
+      FROM nft_signer_authorizations
+      WHERE external_id = ? AND action = ?
+      ORDER BY reserved_at DESC
+      LIMIT 1
+    `).get(externalId, action) as {
+      plan_id: string
+      state: string
+      transaction_hash: string | null
+    } | undefined
+    if (!row) return null
+    return {
+      planId: row.plan_id,
+      state: row.state,
+      transactionHash: row.transaction_hash && TRANSACTION_HASH.test(row.transaction_hash)
+        ? row.transaction_hash as Hex
+        : null,
+    }
+  }
+
   private reserve(plan: ValidatedAssistedPlan, signerAddress: Address, reservedAt: string) {
     try {
       this.database.prepare(`

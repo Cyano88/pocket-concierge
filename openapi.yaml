@@ -216,6 +216,20 @@ paths:
           description: Atomically claimed mint lease with calldata, cost ceilings, and reserved Ethereum nonce
         "409":
           description: Order is unfunded, treasury lease is busy, nonce is reserved, or cost exceeds the mandate
+  /v1/nft-mints/orders/{externalId}/recover-unbroadcast-mint:
+    post:
+      operationId: recoverExpiredUnbroadcastNftMint
+      summary: Internal signer-worker recovery for an expired plan that never reached the signer ledger
+      security:
+        - operatorKey: []
+      parameters:
+        - $ref: "#/components/parameters/ExternalId"
+        - $ref: "#/components/parameters/WorkerId"
+      responses:
+        "200":
+          description: Expired lease released and funded order returned to armed
+        "409":
+          description: Recovery is too early, belongs to another worker, or the Ethereum nonce advanced
   /v1/nft-mints/orders/{externalId}/minted:
     post:
       operationId: recordNftMint

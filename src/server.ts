@@ -445,7 +445,7 @@ const server = createServer(async (req, res) => {
       return json(res, 200, { ok: true, order })
     }
     const nftActionMatch = url.pathname.match(
-      /^\/v1\/nft-mints\/orders\/([^/]+)\/(funding|cancel|prepare|minted|failed|delivery-plan|delivered|refund|refunded)$/,
+      /^\/v1\/nft-mints\/orders\/([^/]+)\/(funding|cancel|prepare|recover-unbroadcast-mint|minted|failed|delivery-plan|delivered|refund|refunded)$/,
     )
     if (method === 'POST' && nftActionMatch?.[1] && nftActionMatch[2]) {
       if (!nftService) throw new ConciergeError('NFT_MINT_NOT_CONFIGURED', 'Pocket NFT Mint & Deliver is disabled.', 503)
@@ -475,6 +475,16 @@ const server = createServer(async (req, res) => {
         return json(res, 200, {
           ok: true,
           execution: await nftService.prepareExecution(
+            'okx-marketplace',
+            externalId,
+            req.headers['x-worker-id'] as string | undefined ?? '',
+          ),
+        })
+      }
+      if (nftActionMatch[2] === 'recover-unbroadcast-mint') {
+        return json(res, 200, {
+          ok: true,
+          recovery: await nftService.recoverExpiredUnbroadcastMint(
             'okx-marketplace',
             externalId,
             req.headers['x-worker-id'] as string | undefined ?? '',

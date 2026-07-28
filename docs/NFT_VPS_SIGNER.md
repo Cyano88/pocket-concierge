@@ -155,6 +155,16 @@ npm run nft:vps-worker -- refund <externalId>
 ```
 
 Each command broadcasts once and submits the hash to Pocket for independent receipt verification.
+If a mint plan expires before the signer reserves it, wait at least 60 seconds after expiry and run:
+
+```bash
+npm run nft:vps-worker -- mint <externalId> --recover-unbroadcast
+```
+
+The worker refuses recovery when its local ledger contains a reserved or broadcast authorization.
+The API also refuses recovery when the Ethereum pending nonce advanced. Only an expired,
+unbroadcast mint lease can return the funded order to `armed`.
+
 If a broadcast succeeds but verification is interrupted or still confirming, recover the same hash
 without unlocking the keystore or broadcasting again:
 

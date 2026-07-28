@@ -107,7 +107,13 @@ test('isolated signer ledger broadcasts one validated plan only once', async () 
     planId: 'nmp_signer_guard_001',
     transactionHash: TRANSACTION_HASH,
   })
+  assert.deepEqual(signer.findAuthorization('mint-demo-001', 'mint'), {
+    planId: 'nmp_signer_guard_001',
+    state: 'broadcast',
+    transactionHash: TRANSACTION_HASH,
+  })
   assert.equal(signer.findBroadcast('mint-demo-001', 'refund'), null)
+  assert.equal(signer.findAuthorization('mint-demo-001', 'refund'), null)
   await assert.rejects(
     signer.execute(response(), constraints()),
     (error: unknown) => (error as { code?: string }).code === 'NFT_SIGNER_AUTHORIZATION_REUSED',

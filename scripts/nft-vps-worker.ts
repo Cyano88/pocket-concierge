@@ -156,14 +156,18 @@ async function main() {
   const action = process.argv[2] as AssistedNftAction | undefined
   const externalId = process.argv[3]
   const recoveryFlagIndex = process.argv.indexOf('--transaction-hash')
+  const unbroadcastRecovery = process.argv.includes('--recover-unbroadcast')
   const recoveryTransactionHash = recoveryFlagIndex >= 0
     ? process.argv[recoveryFlagIndex + 1]
     : undefined
   if (!action || !ACTIONS.has(action) || !externalId) {
     throw new Error(
       'Usage: npm run nft:vps-worker -- <mint|deliver|refund> <externalId> '
-      + '[--transaction-hash 0x...]',
+      + '[--transaction-hash 0x... | --recover-unbroadcast]',
     )
+  }
+  if (unbroadcastRecovery && (action !== 'mint' || recoveryFlagIndex >= 0)) {
+    throw new Error('--recover-unbroadcast is supported only for mint and cannot be combined with a transaction hash.')
   }
   const baseUrl = requiredEnv('POCKET_CONCIERGE_URL').replace(/\/$/, '')
   const operatorKey = requiredEnv('POCKET_CONCIERGE_NFT_OPERATOR_KEY')
@@ -256,6 +260,31 @@ async function main() {
         orderState: verified?.order && typeof verified.order === 'object'
           ? (verified.order as Record<string, unknown>).state
           : undefined,
+      }, null, 2))
+      return
+    } finally {
+      signer.close()
+    }
+  }
+  if (unbroadcastRecovery) {
+    const authorization = signer.findAuthorization(externalId, action)
+    if (authorization) {
+      signer.close()
+      throw new Error(
+        `Signer ledger contains ${authorization.state} authorization ${authorization.planId}; `
+        + 'recover its transaction outcome instead of releasing the API lease.',
+      )
+    }
+    try {
+      const recovered = await postJson(
+        `${baseUrl}/v1/nft-mints/orders/${encodeURIComponent(externalId)}/recover-unbroadcast-mint`,
+        { 'X-Operator-Key': operatorKey, 'X-Worker-Id': workerId },
+      )
+      console.log(JSON.stringify({
+        status: 'unbroadcast_plan_recovered',
+        action,
+        externalId,
+        recovery: recovered.recovery,
       }, null, 2))
       return
     } finally {

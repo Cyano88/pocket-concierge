@@ -21,6 +21,11 @@ export interface NftMintStore {
     action: 'mint' | 'deliver' | 'refund',
     completedAt: string,
   ): Promise<void>
+  releaseExecutionLease(
+    order: NftMintOrder,
+    expectedRevision: number,
+    action: 'mint' | 'deliver' | 'refund',
+  ): Promise<void>
   list(states: NftMintState[]): Promise<NftMintOrder[]>
 }
 
@@ -157,6 +162,24 @@ export class MemoryNftMintStore implements NftMintStore {
     }
     await this.update(order, expectedRevision)
     current[1].completedAt = completedAt
+  }
+
+  async releaseExecutionLease(
+    order: NftMintOrder,
+    expectedRevision: number,
+    action: 'mint' | 'deliver' | 'refund',
+  ) {
+    const candidates = [...this.executionLeases.entries()]
+      .filter(([leaseId, lease]) => (
+        leaseId.startsWith(`${order.orderId}:${action}:`) && !lease.completedAt
+      ))
+      .sort(([, left], [, right]) => right.executionAttempt - left.executionAttempt)
+    const current = candidates[0]
+    if (!current) {
+      throw new ConciergeError('NFT_EXECUTION_LEASE_MISSING', 'Execution lease was not found.', 409)
+    }
+    await this.update(order, expectedRevision)
+    this.executionLeases.delete(current[0])
   }
 
   async list(states: NftMintState[]) {
@@ -504,6 +527,50 @@ export class SqliteNftMintStore implements NftMintStore {
       `).run(completedAt, order.orderId, action)
       if (completed.changes !== 1) {
         throw new ConciergeError('NFT_EXECUTION_LEASE_MISSING', 'Execution lease was not found.', 409)
+      }
+      this.database.exec('COMMIT')
+    } catch (error) {
+      this.database.exec('ROLLBACK')
+      throw error
+    }
+  }
+
+  async releaseExecutionLease(
+    order: NftMintOrder,
+    expectedRevision: number,
+    action: 'mint' | 'deliver' | 'refund',
+  ) {
+    if (order.revision !== expectedRevision + 1) {
+      throw new ConciergeError('NFT_ORDER_WRITE_CONFLICT', 'NFT mint order revision is invalid.', 409)
+    }
+    this.database.exec('BEGIN IMMEDIATE')
+    try {
+      const released = this.database.prepare(`
+        DELETE FROM nft_execution_leases
+        WHERE lease_id = (
+          SELECT lease_id FROM nft_execution_leases
+          WHERE order_id = ? AND action = ? AND completed_at IS NULL
+          ORDER BY execution_attempt DESC
+          LIMIT 1
+        )
+      `).run(order.orderId, action)
+      if (released.changes !== 1) {
+        throw new ConciergeError('NFT_EXECUTION_LEASE_MISSING', 'Execution lease was not found.', 409)
+      }
+      const updated = this.database.prepare(`
+        UPDATE nft_mint_orders
+        SET state = ?, revision = ?, document = ?
+        WHERE owner_id = ? AND external_id = ? AND revision = ?
+      `).run(
+        order.state,
+        order.revision,
+        JSON.stringify(order),
+        order.ownerId,
+        order.externalId,
+        expectedRevision,
+      )
+      if (updated.changes !== 1) {
+        throw new ConciergeError('NFT_ORDER_WRITE_CONFLICT', 'NFT mint order changed concurrently; reload before retrying.', 409)
       }
       this.database.exec('COMMIT')
     } catch (error) {

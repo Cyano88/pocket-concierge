@@ -14,6 +14,7 @@ const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000'
 const MIN_ASSISTED_REFUND_MAX_FEE_PER_GAS_WEI = 1_500_000_000n
 const ASSISTED_REFUND_BALANCE_HEADROOM_PERCENT = 20n
 const PREVIEW_FALLBACK_MINT_GAS_LIMIT = 350_000n
+const UNBROADCAST_RECOVERY_GRACE_MS = 60_000
 const CANCELLATION_REASONS = new Set(['customer_cancelled', 'mint_failed', 'order_expired'])
 
 export const NFT_MINT_SERVICE_FEE_ATOMIC = '1000000'
@@ -493,11 +494,57 @@ export class NftMintService {
 
   async prepareExecution(ownerId: string, externalId: string, leaseOwnerRaw: string) {
     const order = await this.requireOrder(ownerId, externalId)
+    const now = this.dependencies.now()
+    const leaseOwner = this.validateLeaseOwner(leaseOwnerRaw)
+    if (order.state === 'minting' && order.executionPlan && order.deposit) {
+      if (order.executionPlan.leaseOwner !== leaseOwner) {
+        throw new ConciergeError(
+          'NFT_EXECUTION_LEASE_CLAIMED',
+          'The current mint plan belongs to a different worker.',
+          409,
+        )
+      }
+      if (Date.parse(order.executionPlan.expiresAt) <= now) {
+        throw new ConciergeError(
+          'NFT_MINT_PLAN_EXPIRED',
+          'The mint plan expired before signing; use guarded unbroadcast recovery.',
+          409,
+        )
+      }
+      const transaction = await this.dependencies.chain.buildMint(
+        order.collectionSlug,
+        order.nftContract,
+        order.treasuryAddress,
+      )
+      this.dependencies.chain.validateMint(transaction, order.nftContract, order.treasuryAddress)
+      if (
+        transaction.target !== order.executionPlan.target
+        || calldataDigest(transaction.calldata) !== order.executionPlan.calldataHash
+        || transaction.valueWei !== order.executionPlan.valueWei
+      ) {
+        throw new ConciergeError(
+          'NFT_MINT_PLAN_DRIFT',
+          'The live mint transaction no longer matches the leased execution plan.',
+          409,
+        )
+      }
+      return {
+        order: publicOrder(order),
+        transaction: {
+          chainId: 1 as const,
+          from: order.treasuryAddress,
+          to: transaction.target,
+          data: transaction.calldata,
+          valueWei: order.executionPlan.valueWei,
+          gasLimit: order.executionPlan.gasLimit,
+          maxFeePerGasWei: order.executionPlan.maxFeePerGasWei,
+          nonce: order.executionPlan.transactionNonce,
+        },
+      }
+    }
     if (order.state !== 'armed' || !order.deposit) {
       throw new ConciergeError('NFT_ORDER_NOT_ARMED', 'A confirmed Ethereum deposit is required before mint preparation.', 409)
     }
-    const now = this.dependencies.now()
-    const leaseOwner = this.validateLeaseOwner(leaseOwnerRaw)
     if (Date.parse(order.expiresAt) <= now) {
       await this.expire(order)
       throw new ConciergeError('NFT_ORDER_EXPIRED', 'NFT mint order expired before execution.', 409)
@@ -564,6 +611,61 @@ export class NftMintService {
         maxFeePerGasWei: maxFeePerGas.toString(),
         nonce: transactionNonce.toString(),
       },
+    }
+  }
+
+  async recoverExpiredUnbroadcastMint(
+    ownerId: string,
+    externalId: string,
+    leaseOwnerRaw: string,
+  ) {
+    const order = await this.requireOrder(ownerId, externalId)
+    if (order.state === 'armed' && !order.executionPlan) {
+      return { recovered: false, order: publicOrder(order) }
+    }
+    if (order.state !== 'minting' || !order.executionPlan || !order.deposit) {
+      throw new ConciergeError(
+        'NFT_MINT_RECOVERY_INVALID',
+        'Only an expired, unverified mint plan can be released.',
+        409,
+      )
+    }
+    const leaseOwner = this.validateLeaseOwner(leaseOwnerRaw)
+    if (order.executionPlan.leaseOwner !== leaseOwner) {
+      throw new ConciergeError(
+        'NFT_EXECUTION_LEASE_CLAIMED',
+        'The current mint plan belongs to a different worker.',
+        409,
+      )
+    }
+    const now = this.dependencies.now()
+    if (Date.parse(order.executionPlan.expiresAt) + UNBROADCAST_RECOVERY_GRACE_MS > now) {
+      throw new ConciergeError(
+        'NFT_MINT_RECOVERY_TOO_EARLY',
+        'Wait 60 seconds after plan expiry before unbroadcast recovery.',
+        409,
+      )
+    }
+    const reservedNonce = Number(order.executionPlan.transactionNonce)
+    const pendingNonce = await this.pendingNonce(order.treasuryAddress)
+    if (pendingNonce !== reservedNonce) {
+      throw new ConciergeError(
+        'NFT_EXECUTION_OUTCOME_REQUIRED',
+        'Ethereum nonce advanced; recover the transaction outcome instead of releasing the plan.',
+        409,
+      )
+    }
+    const expectedRevision = order.revision
+    const releasedPlanId = order.executionPlan.planId
+    delete order.executionPlan
+    order.state = 'armed'
+    order.revision += 1
+    order.updatedAt = new Date(now).toISOString()
+    await this.dependencies.store.releaseExecutionLease(order, expectedRevision, 'mint')
+    return {
+      recovered: true,
+      releasedPlanId,
+      order: publicOrder(order),
     }
   }
 
