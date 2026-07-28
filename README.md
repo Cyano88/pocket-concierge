@@ -161,8 +161,9 @@ limits, and returns the manifest hash that the paid order will bind.
 Create the paid order with `POST /v1/okx/nft-mints/orders` using
 [examples/nft-mint-order.json](./examples/nft-mint-order.json). The signed replay returns an
 explicit accepted-order deliverable, `orderAccessToken`, authenticated final-proof URL, Ethereum
-treasury address, and required maximum deposit. The caller then sends ETH from the immutable
-`fundingAddress` and submits the full Ethereum transaction hash:
+treasury address, and required maximum deposit. The caller then sends at least the displayed ETH
+amount from the immutable `fundingAddress` and submits the full Ethereum transaction hash. Any
+overfunding follows the same verified refund accounting:
 
 ```powershell
 $env:POCKET_CONCIERGE_NFT_PILOT_KEY='<pilot access key>'
@@ -187,7 +188,8 @@ Content-Type: application/json
 ```
 
 Pocket independently verifies chain ID 1 through its configured mainnet RPC, successful receipt,
-sender, treasury destination, value, confirmations, expiry, and global transaction-hash uniqueness.
+sender, treasury destination, a value at least equal to the displayed requirement, confirmations,
+expiry, and global transaction-hash uniqueness.
 Only then does the order become `armed`.
 
 The execution worker endpoints require a separate operator key. `prepare` reads the public stage,
@@ -209,6 +211,10 @@ claims one treasury transaction lease at a time, reserves and verifies the Ether
 delivery, and refund, supports unfunded cancellation, and deducts independently verified failed-mint
 gas before preparing an immutable refund. See
 [`docs/NFT_VPS_SIGNER.md`](./docs/NFT_VPS_SIGNER.md) for the hardened Ubuntu deployment.
+
+The public proof reconciles the complete deposit into mint price, actual mint/delivery/refund gas,
+customer refund and disclosed `retainedSafetyHeadroomWei`. Its
+`executionAccounting.balanced` field is true only when those values account for every deposited wei.
 
 ## Railway deployment
 

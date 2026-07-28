@@ -303,9 +303,31 @@ export class NftMintService {
       BigInt(order.mint.gasCostWei)
       + BigInt(order.delivery.gasCostWei)
       + BigInt(order.refund.gasCostWei)
-    ).toString()
+    )
+    const mintPriceWei = BigInt(order.executionPlan?.valueWei ?? '0')
+    const fundingWei = BigInt(order.deposit.amountWei)
+    const refundedWei = BigInt(order.refund.amountWei)
+    const retainedSafetyHeadroomWei = (
+      fundingWei
+      - mintPriceWei
+      - totalExecutionGasWei
+      - refundedWei
+    )
+    if (mintPriceWei <= 0n || retainedSafetyHeadroomWei < 0n) {
+      throw new ConciergeError(
+        'NFT_PROOF_ACCOUNTING_INVALID',
+        'The verified NFT pilot does not reconcile its execution funding.',
+        503,
+      )
+    }
+    const accountedWei = (
+      mintPriceWei
+      + totalExecutionGasWei
+      + refundedWei
+      + retainedSafetyHeadroomWei
+    )
     const proof = {
-      proofVersion: '1',
+      proofVersion: '2',
       service: 'Pocket NFT Mint & Deliver',
       status: 'verified_complete',
       network: 'ethereum-mainnet',
@@ -334,6 +356,7 @@ export class NftMintService {
         },
         mint: {
           transactionHash: order.mint.transactionHash,
+          priceWei: mintPriceWei.toString(),
           gasCostWei: order.mint.gasCostWei,
           transactionNonce: order.mint.transactionNonce,
         },
@@ -348,7 +371,17 @@ export class NftMintService {
           gasCostWei: order.refund.gasCostWei,
           transactionNonce: order.refund.transactionNonce,
         },
-        totalExecutionGasWei,
+        totalExecutionGasWei: totalExecutionGasWei.toString(),
+        retainedSafetyHeadroomWei: retainedSafetyHeadroomWei.toString(),
+        executionAccounting: {
+          fundingWei: fundingWei.toString(),
+          mintPriceWei: mintPriceWei.toString(),
+          totalExecutionGasWei: totalExecutionGasWei.toString(),
+          refundedWei: refundedWei.toString(),
+          retainedSafetyHeadroomWei: retainedSafetyHeadroomWei.toString(),
+          accountedWei: accountedWei.toString(),
+          balanced: accountedWei === fundingWei,
+        },
       },
       verifiedAt: order.refund.confirmedAt,
     }
@@ -704,6 +737,13 @@ export class NftMintService {
       order.nftRecipient,
       BigInt(order.mint.tokenId),
     )
+    if (delivery.confirmations < this.dependencies.minimumConfirmations) {
+      throw new ConciergeError(
+        'NFT_DELIVERY_CONFIRMING',
+        'NFT delivery transaction has insufficient confirmations.',
+        409,
+      )
+    }
     if (
       delivery.from !== order.treasuryAddress
       || delivery.to !== order.nftContract
@@ -711,7 +751,6 @@ export class NftMintService {
       || delivery.valueWei !== '0'
       || delivery.nonce.toString() !== order.deliveryPlan.transactionNonce
       || delivery.tokenId !== BigInt(order.mint.tokenId)
-      || delivery.confirmations < this.dependencies.minimumConfirmations
     ) {
       throw new ConciergeError('NFT_DELIVERY_MISMATCH', 'NFT delivery is not a confirmed transfer from the Pocket treasury.', 409)
     }
@@ -832,12 +871,18 @@ export class NftMintService {
       order.refundAddress,
       BigInt(order.refundPlan.amountWei),
     )
+    if (refund.confirmations < this.dependencies.minimumConfirmations) {
+      throw new ConciergeError(
+        'NFT_REFUND_CONFIRMING',
+        'Refund transaction has insufficient confirmations.',
+        409,
+      )
+    }
     if (
       refund.from !== order.treasuryAddress
       || refund.to !== order.refundAddress
       || refund.valueWei !== order.refundPlan.amountWei
       || refund.nonce.toString() !== order.refundPlan.transactionNonce
-      || refund.confirmations < this.dependencies.minimumConfirmations
     ) {
       throw new ConciergeError('NFT_REFUND_MISMATCH', 'Refund is not a confirmed exact transfer to the declared refund address.', 409)
     }

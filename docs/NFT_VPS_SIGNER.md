@@ -138,7 +138,7 @@ Do not fund the wallet before its address matches both the VPS environment and P
 
 ## 8. Execute one controlled order
 
-After the buyer pays the 1-USDT service fee and sends the exact displayed ETH deposit:
+After the buyer pays the 1-USDT service fee and sends at least the displayed ETH deposit:
 
 ```bash
 cd /opt/pocket-signer/app
@@ -155,6 +155,17 @@ npm run nft:vps-worker -- refund <externalId>
 ```
 
 Each command broadcasts once and submits the hash to Pocket for independent receipt verification.
+If a broadcast succeeds but verification is interrupted or still confirming, recover the same hash
+without unlocking the keystore or broadcasting again:
+
+```bash
+npm run nft:vps-worker -- mint <externalId> --transaction-hash 0x...
+npm run nft:vps-worker -- deliver <externalId> --transaction-hash 0x...
+npm run nft:vps-worker -- refund <externalId> --transaction-hash 0x...
+```
+
+The worker polls transient server failures and explicit confirmation-pending responses for up to five
+minutes. A permanent transaction mismatch stops immediately.
 If broadcast status becomes uncertain, do not rerun the action. Recover the reserved nonce and
 transaction hash from Ethereum and `/opt/pocket-signer/data/signer.sqlite` first.
 
@@ -163,10 +174,10 @@ transaction hash from Ethereum and `/opt/pocket-signer/data/signer.sqlite` first
 Keep public order creation gated until one fresh run proves:
 
 - 1-USDT OKX x402 payment and replay;
-- exact Ethereum deposit verification;
+- Ethereum deposit verification against the displayed minimum, including refundable overfunding;
 - SeaDrop mint from the configured VPS signer;
 - exact token delivery to the declared recipient;
-- unused ETH refund;
+- unused ETH refund plus disclosed retained safety headroom;
 - final public proof containing all transaction hashes;
 - duplicate plan and duplicate nonce rejection.
 

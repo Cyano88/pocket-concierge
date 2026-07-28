@@ -663,6 +663,16 @@ test('records only a mint matching the immutable plan and exact NFT delivery', a
   )
 
   chain.delivery.tokenId = 77n
+  chain.delivery.confirmations = 1
+  await assert.rejects(
+    app.recordDelivery(
+      'agent-one',
+      'opensea-drop-0001',
+      { deliveryTransactionHash: DELIVERY_HASH },
+    ),
+    (error: unknown) => (error as { code?: string }).code === 'NFT_DELIVERY_CONFIRMING',
+  )
+  chain.delivery.confirmations = 2
   const delivered = await app.recordDelivery(
     'agent-one',
     'opensea-drop-0001',
@@ -676,6 +686,16 @@ test('records only a mint matching the immutable plan and exact NFT delivery', a
   assert.equal(refundPlan.transaction.to, REFUND)
   assert.equal(refundPlan.transaction.valueWei, '16592800000000000')
   assert.equal(refundPlan.transaction.maxFeePerGasWei, '36000000000')
+  chain.refund.confirmations = 1
+  await assert.rejects(
+    app.recordRefund(
+      'agent-one',
+      'opensea-drop-0001',
+      { refundTransactionHash: REFUND_HASH },
+    ),
+    (error: unknown) => (error as { code?: string }).code === 'NFT_REFUND_CONFIRMING',
+  )
+  chain.refund.confirmations = 2
   const refunded = await app.recordRefund(
     'agent-one',
     'opensea-drop-0001',
@@ -687,6 +707,17 @@ test('records only a mint matching the immutable plan and exact NFT delivery', a
   assert.equal(proof.status, 'verified_complete')
   assert.equal(proof.purchase.tokenId, '77')
   assert.equal(proof.settlement.refund.transactionHash, REFUND_HASH)
+  assert.equal(proof.settlement.mint.priceWei, '10000000000000000')
+  assert.equal(proof.settlement.retainedSafetyHeadroomWei, '307200000000000')
+  assert.deepEqual(proof.settlement.executionAccounting, {
+    fundingWei: '30000000000000000',
+    mintPriceWei: '10000000000000000',
+    totalExecutionGasWei: '3100000000000000',
+    refundedWei: '16592800000000000',
+    retainedSafetyHeadroomWei: '307200000000000',
+    accountedWei: '30000000000000000',
+    balanced: true,
+  })
   assert.match(proof.proofId, /^nfp_[a-f0-9]{24}$/)
   assert.match(proof.proofHash, /^[a-f0-9]{64}$/)
   assert.equal(JSON.stringify(proof).includes('agent-one'), false)

@@ -10,6 +10,23 @@ import {
 import { VpsNftSignerBackend } from '../src/nft-vps-signer-backend.js'
 
 const ACTIONS = new Set<AssistedNftAction>(['mint', 'deliver', 'refund'])
+const TRANSACTION_HASH = /^0x[0-9a-fA-F]{64}$/
+const VERIFICATION_ATTEMPTS = 60
+const VERIFICATION_DELAY_MS = 5_000
+const CONFIRMING_ERRORS = new Set([
+  'NFT_MINT_CONFIRMING',
+  'NFT_DELIVERY_CONFIRMING',
+  'NFT_REFUND_CONFIRMING',
+])
+
+class PocketRequestError extends Error {
+  constructor(
+    readonly status: number,
+    readonly payload: Record<string, unknown>,
+  ) {
+    super(`Pocket request failed (HTTP ${status}): ${JSON.stringify(payload)}`)
+  }
+}
 
 function requiredEnv(name: string) {
   const value = String(process.env[name] || '').trim()
@@ -33,8 +50,8 @@ async function postJson(url: string, headers: Record<string, string>, body?: unk
     headers: body === undefined ? headers : { ...headers, 'content-type': 'application/json' },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   })
-  const payload = await response.json().catch(() => ({ error: 'non_json_response' }))
-  if (!response.ok) throw new Error(`Pocket request failed (HTTP ${response.status}): ${JSON.stringify(payload)}`)
+  const payload = await response.json().catch(() => ({ error: 'non_json_response' })) as Record<string, unknown>
+  if (!response.ok) throw new PocketRequestError(response.status, payload)
   return payload
 }
 
@@ -91,7 +108,7 @@ async function submitForVerification(
 ) {
   const target = verificationTarget(action)
   let lastError = 'verification pending'
-  for (let attempt = 1; attempt <= 6; attempt += 1) {
+  for (let attempt = 1; attempt <= VERIFICATION_ATTEMPTS; attempt += 1) {
     try {
       return await postJson(
         `${baseUrl}/v1/nft-mints/orders/${encodeURIComponent(externalId)}/${target.endpoint}`,
@@ -100,7 +117,27 @@ async function submitForVerification(
       )
     } catch (error) {
       lastError = error instanceof Error ? error.message : String(error)
-      if (attempt < 6) await new Promise(resolve => setTimeout(resolve, 5_000))
+      const retryable = error instanceof PocketRequestError
+        && (
+          error.status >= 500
+          || (
+            error.status === 409
+            && CONFIRMING_ERRORS.has(String(error.payload.error ?? ''))
+          )
+        )
+      if (!retryable) throw error
+      if (attempt % 6 === 0) {
+        console.log(JSON.stringify({
+          status: 'verification_pending',
+          action,
+          externalId,
+          transactionHash,
+          attempt,
+        }))
+      }
+      if (attempt < VERIFICATION_ATTEMPTS) {
+        await new Promise(resolve => setTimeout(resolve, VERIFICATION_DELAY_MS))
+      }
     }
   }
   throw new Error(
@@ -112,11 +149,40 @@ async function submitForVerification(
 async function main() {
   const action = process.argv[2] as AssistedNftAction | undefined
   const externalId = process.argv[3]
+  const recoveryFlagIndex = process.argv.indexOf('--transaction-hash')
+  const recoveryTransactionHash = recoveryFlagIndex >= 0
+    ? process.argv[recoveryFlagIndex + 1]
+    : undefined
   if (!action || !ACTIONS.has(action) || !externalId) {
-    throw new Error('Usage: npm run nft:vps-worker -- <mint|deliver|refund> <externalId>')
+    throw new Error(
+      'Usage: npm run nft:vps-worker -- <mint|deliver|refund> <externalId> '
+      + '[--transaction-hash 0x...]',
+    )
   }
   const baseUrl = requiredEnv('POCKET_CONCIERGE_URL').replace(/\/$/, '')
   const operatorKey = requiredEnv('POCKET_CONCIERGE_NFT_OPERATOR_KEY')
+  if (recoveryFlagIndex >= 0) {
+    if (!recoveryTransactionHash || !TRANSACTION_HASH.test(recoveryTransactionHash)) {
+      throw new Error('--transaction-hash must be a full Ethereum transaction hash.')
+    }
+    const verified = await submitForVerification(
+      baseUrl,
+      externalId,
+      action,
+      operatorKey,
+      recoveryTransactionHash,
+    )
+    console.log(JSON.stringify({
+      status: 'recovered_and_verified',
+      action,
+      externalId,
+      transactionHash: recoveryTransactionHash,
+      orderState: verified?.order && typeof verified.order === 'object'
+        ? (verified.order as Record<string, unknown>).state
+        : undefined,
+    }, null, 2))
+    return
+  }
   const workerId = requiredEnv('POCKET_CONCIERGE_NFT_WORKER_ID')
   const treasuryAddress = requiredEnv('POCKET_CONCIERGE_NFT_TREASURY_ADDRESS')
   const maximumFeePerGasWei = requiredEnv('POCKET_CONCIERGE_NFT_WORKER_MAX_FEE_PER_GAS_WEI')
@@ -179,7 +245,9 @@ async function main() {
       externalId,
       planId: result.planId,
       transactionHash: result.transactionHash,
-      orderState: verified?.order?.state,
+      orderState: verified?.order && typeof verified.order === 'object'
+        ? (verified.order as Record<string, unknown>).state
+        : undefined,
     }, null, 2))
   } finally {
     signer.close()
