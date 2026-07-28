@@ -8,30 +8,43 @@ async function hidden(prompt: string) {
     throw new Error('An interactive terminal is required.')
   }
   stdout.write(prompt)
-  stdin.setRawMode(true)
-  stdin.resume()
   stdin.setEncoding('utf8')
-  let value = ''
-  try {
-    for await (const chunk of stdin.iterator({ destroyOnReturn: false })) {
+  return new Promise<string>((resolve, reject) => {
+    let value = ''
+    const cleanup = () => {
+      stdin.off('data', onData)
+      stdin.off('end', onEnd)
+      stdin.setRawMode(false)
+      stdin.pause()
+    }
+    const onEnd = () => {
+      cleanup()
+      reject(new Error('Terminal closed before password entry.'))
+    }
+    const onData = (chunk: string) => {
       for (const character of chunk) {
-        if (character === '\u0003') throw new Error('Cancelled.')
-        if (character === '\r' || character === '\n') {
+        if (character === '\u0003') {
+          cleanup()
           stdout.write('\n')
-          return value
+          reject(new Error('Cancelled.'))
+          return
         }
-        if (character === '\u007f' || character === '\b') {
-          value = value.slice(0, -1)
-        } else {
-          value += character
+        if (character === '\r' || character === '\n') {
+          cleanup()
+          stdout.write('\n')
+          resolve(value)
+          return
         }
+        value = character === '\u007f' || character === '\b'
+          ? value.slice(0, -1)
+          : value + character
       }
     }
-  } finally {
-    stdin.setRawMode(false)
-    stdin.pause()
-  }
-  throw new Error('Terminal closed before password entry.')
+    stdin.on('data', onData)
+    stdin.once('end', onEnd)
+    stdin.setRawMode(true)
+    stdin.resume()
+  })
 }
 
 async function main() {
