@@ -19,6 +19,12 @@ function optionalArg(name: string) {
   return index >= 0 ? String(process.argv[index + 1] || '').trim() : ''
 }
 
+function isNotFound(error: unknown) {
+  if (!error || typeof error !== 'object') return false
+  const candidate = error as { status?: unknown; message?: unknown }
+  return candidate.status === 404 || String(candidate.message || '').includes('404')
+}
+
 async function main() {
   const appId = requiredEnv('POCKET_CONCIERGE_NFT_PRIVY_APP_ID')
   const appSecret = requiredEnv('POCKET_CONCIERGE_NFT_PRIVY_APP_SECRET')
@@ -28,9 +34,7 @@ async function main() {
   const currentSignerId = requiredEnv(
     'POCKET_CONCIERGE_NFT_PRIVY_CURRENT_WORKER_SIGNER_ID',
   )
-  const retiredAuthorizationKey = requiredEnv(
-    'POCKET_CONCIERGE_NFT_PRIVY_RETIRED_WORKER_AUTHORIZATION_PRIVATE_KEY',
-  )
+  const statusOnly = process.argv.includes('--status-only')
   if (retiredSignerId === currentSignerId) {
     throw new Error('The retired and current worker signer IDs must be different.')
   }
@@ -40,16 +44,14 @@ async function main() {
     appSecret,
     requestExpiry: { defaultMs: DELETION_REQUEST_EXPIRY_MS },
   })
-  const targetQuorum = await client.keyQuorums().get(retiredSignerId)
-  const derivedPublicKey = derivePrivyAuthorizationPublicKey(retiredAuthorizationKey)
-  if (
-    targetQuorum.authorization_keys.length !== 1
-    || normalizePrivyPublicKey(targetQuorum.authorization_keys[0]?.public_key || '')
-      !== derivedPublicKey
-  ) {
-    throw new Error(
-      'The supplied retired worker key does not belong to the target quorum; no deletion was sent.',
-    )
+  let targetQuorum: {
+    authorization_keys: Array<{ public_key: string }>
+    display_name: string | null
+  } | null = null
+  try {
+    targetQuorum = await client.keyQuorums().get(retiredSignerId)
+  } catch (error) {
+    if (!isNotFound(error)) throw error
   }
 
   const references: Array<{ walletId: string; relationship: 'owner' | 'signer' }> = []
@@ -64,6 +66,34 @@ async function main() {
       }
       if (signer.signer_id === currentSignerId) currentSignerReferences += 1
     }
+  }
+  if (statusOnly) {
+    console.log(JSON.stringify({
+      ok: true,
+      status: targetQuorum ? 'retired_worker_still_exists' : 'retired_worker_not_found',
+      retiredSignerId,
+      retiredSignerName: targetQuorum?.display_name || null,
+      currentSignerId,
+      attachedWalletReferences: references.length,
+      replacementWalletReferences: currentSignerReferences,
+    }, null, 2))
+    return
+  }
+  if (!targetQuorum) {
+    throw new Error('Retired worker quorum no longer exists; no deletion is required.')
+  }
+  const retiredAuthorizationKey = requiredEnv(
+    'POCKET_CONCIERGE_NFT_PRIVY_RETIRED_WORKER_AUTHORIZATION_PRIVATE_KEY',
+  )
+  const derivedPublicKey = derivePrivyAuthorizationPublicKey(retiredAuthorizationKey)
+  if (
+    targetQuorum.authorization_keys.length !== 1
+    || normalizePrivyPublicKey(targetQuorum.authorization_keys[0]?.public_key || '')
+      !== derivedPublicKey
+  ) {
+    throw new Error(
+      'The supplied retired worker key does not belong to the target quorum; no deletion was sent.',
+    )
   }
   if (references.length) {
     throw new Error(
