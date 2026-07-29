@@ -1,5 +1,9 @@
 import { PrivyClient } from '@privy-io/node'
 import { getAddress } from 'viem'
+import {
+  derivePrivyAuthorizationPublicKey,
+  normalizePrivyPublicKey,
+} from '../src/privy-authorization-key.js'
 
 function requiredEnv(name: string) {
   const value = String(process.env[name] || '').trim()
@@ -108,6 +112,17 @@ async function main() {
   const adminAuthorizationKey = requiredEnv(
     'POCKET_CONCIERGE_NFT_PRIVY_ADMIN_AUTHORIZATION_PRIVATE_KEY',
   )
+  const derivedAdminPublicKey = derivePrivyAuthorizationPublicKey(adminAuthorizationKey)
+  const ownerQuorum = await client.keyQuorums().get(adminOwnerId)
+  if (
+    ownerQuorum.authorization_keys.length !== 1
+    || normalizePrivyPublicKey(ownerQuorum.authorization_keys[0]?.public_key || '')
+      !== derivedAdminPublicKey
+  ) {
+    throw new Error(
+      'The supplied Policy Admin key does not belong to the configured wallet owner; no update was sent.',
+    )
+  }
   const updated = await client.wallets().update(walletId, {
     additional_signers: [{
       signer_id: newWorkerSignerId,
