@@ -34,11 +34,13 @@ const PUBLIC_RIGHTS = new Set(['cc0', 'public-domain', 'commercial-license', 'cr
 const MAX_METADATA_BYTES = 1_000_000
 const MAX_IMAGE_BYTES = 20_000_000
 const MAX_INPUT_PIXELS = 40_000_000
+const WALLPAPER_RENDER_VERSION = '2'
 
 type WallpaperRights = 'private-use' | 'cc0' | 'public-domain' | 'commercial-license' | 'creator-opt-in'
 
 export type WallpaperAsset = {
   assetId: string
+  renderVersion: string
   externalId: string
   nftContract: Address
   tokenId: string
@@ -242,7 +244,9 @@ export class WallpaperService {
       throw new ConciergeError('WALLPAPER_RIGHTS_EVIDENCE_REQUIRED', 'Public catalog rights require a reviewable rightsReference.', 409)
     }
     const existing = this.getByExternalId(externalId)
-    if (existing) return { replayed: true, asset: existing }
+    if (existing?.renderVersion === WALLPAPER_RENDER_VERSION) {
+      return { replayed: true, asset: existing }
+    }
 
     const sourceTokenUri = await this.client.readContract({
       address: nftContract,
@@ -273,12 +277,44 @@ export class WallpaperService {
     if (!sourceInfo.width || !sourceInfo.height) {
       throw new ConciergeError('WALLPAPER_IMAGE_INVALID', 'NFT image has no usable dimensions.', 409)
     }
-    const assetId = `nwa_${createHash('sha256').update(`${nftContract}:${tokenId}:${sha256(image)}`).digest('hex').slice(0, 24)}`
+    const assetId = `nwa_${createHash('sha256').update(`${WALLPAPER_RENDER_VERSION}:${nftContract}:${tokenId}:${sha256(image)}`).digest('hex').slice(0, 24)}`
     const directory = join(this.outputDirectory, assetId)
     await mkdir(directory, { recursive: true })
+    const stats = await base.stats()
+    const background = {
+      r: stats.dominant.r,
+      g: stats.dominant.g,
+      b: stats.dominant.b,
+      alpha: 1,
+    }
     const render = async (name: string, width: number, height: number) => {
-      const output = await sharp(image, { failOn: 'warning', limitInputPixels: MAX_INPUT_PIXELS })
-        .resize(width, height, { fit: 'cover', position: 'attention' })
+      const padding = Math.round(Math.min(width, height) * 0.08)
+      const foreground = await sharp(image, {
+        failOn: 'warning',
+        limitInputPixels: MAX_INPUT_PIXELS,
+      })
+        .resize({
+          width: width - padding * 2,
+          height: height - padding * 2,
+          fit: 'inside',
+          withoutEnlargement: false,
+        })
+        .png({ compressionLevel: 9, adaptiveFiltering: true })
+        .toBuffer()
+      const foregroundInfo = await sharp(foreground).metadata()
+      const output = await sharp({
+        create: {
+          width,
+          height,
+          channels: 4,
+          background,
+        },
+      })
+        .composite([{
+          input: foreground,
+          left: Math.floor((width - foregroundInfo.width!) / 2),
+          top: Math.floor((height - foregroundInfo.height!) / 2),
+        }])
         .png({ compressionLevel: 9, adaptiveFiltering: true })
         .toBuffer()
       const path = join(directory, `${name}.png`)
@@ -293,6 +329,7 @@ export class WallpaperService {
     const createdAt = new Date(this.now()).toISOString()
     const asset: WallpaperAsset = {
       assetId,
+      renderVersion: WALLPAPER_RENDER_VERSION,
       externalId,
       nftContract: getAddress(nftContract),
       tokenId,
@@ -311,6 +348,10 @@ export class WallpaperService {
     this.database.prepare(`
       INSERT INTO nft_wallpaper_assets (asset_id, external_id, document, created_at)
       VALUES (?, ?, ?, ?)
+      ON CONFLICT(external_id) DO UPDATE SET
+        asset_id = excluded.asset_id,
+        document = excluded.document,
+        created_at = excluded.created_at
     `).run(assetId, externalId, JSON.stringify(asset), createdAt)
     return { replayed: false, asset }
   }
