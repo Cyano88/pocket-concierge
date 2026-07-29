@@ -132,6 +132,22 @@ unset POCKET_CONCIERGE_NFT_PRIVY_ADMIN_AUTHORIZATION_PRIVATE_KEY
 Only after the wallet update succeeds should the worker environment be changed to the new worker
 authorization private key and the old worker key be deleted in Privy.
 
+If the dashboard does not expose key-quorum deletion, use the guarded deletion command. It scans
+every wallet in the app and refuses deletion while the retired quorum is still an owner or signer:
+
+```bash
+export POCKET_CONCIERGE_NFT_PRIVY_RETIRED_WORKER_SIGNER_ID='<old-worker-id>'
+export POCKET_CONCIERGE_NFT_PRIVY_CURRENT_WORKER_SIGNER_ID='<new-worker-id>'
+read -rsp 'Retired worker authorization key: ' \
+  POCKET_CONCIERGE_NFT_PRIVY_RETIRED_WORKER_AUTHORIZATION_PRIVATE_KEY
+echo
+export POCKET_CONCIERGE_NFT_PRIVY_RETIRED_WORKER_AUTHORIZATION_PRIVATE_KEY
+npm run nft:privy-delete-retired-worker
+```
+
+Review the dry-run output before repeating it with `--apply --confirm-delete '<old-worker-id>'`.
+Unset the retired authorization key immediately after either command.
+
 Before changing the API treasury, verify the live wallet ownership, signer override, policy denial
 and sign-only path. This creates no broadcast and uses a deliberately unreachable nonce:
 

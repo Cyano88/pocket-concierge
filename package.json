@@ -17,6 +17,7 @@
     "nft:vps-api-check": "tsx scripts/nft-vps-api-check.ts",
     "nft:privy-policy-check": "tsx scripts/nft-privy-policy-check.ts",
     "nft:privy-rotate-worker": "tsx scripts/nft-privy-rotate-worker.ts",
+    "nft:privy-delete-retired-worker": "tsx scripts/nft-privy-delete-retired-worker.ts",
     "nft:vps-worker": "tsx scripts/nft-vps-worker.ts",
     "nft:managed-daemon": "tsx scripts/nft-managed-daemon.ts",
     "test": "node --import tsx --test test/*.test.ts",
