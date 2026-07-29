@@ -10,6 +10,7 @@ import {
 } from './authority-check.js'
 import { errandToMissionInput, errandView } from './errands.js'
 import { ConciergeError } from './errors.js'
+import { FixedWindowRateLimiter } from './rate-limit.js'
 import { buildOkxAuthorityProof, OKX_AUTHORITY_PROOF_ROUTE } from './okx-proof.js'
 import { ConciergeService, fetchJson } from './service.js'
 import { MemoryMissionStore, SqliteMissionStore } from './store.js'
@@ -102,6 +103,7 @@ const nftTreasuryRaw = String(process.env.POCKET_CONCIERGE_NFT_TREASURY_ADDRESS 
 const nftOrderTokenSecret = String(process.env.POCKET_CONCIERGE_NFT_ORDER_TOKEN_SECRET || '').trim()
 const nftOperatorKey = String(process.env.POCKET_CONCIERGE_NFT_OPERATOR_KEY || '').trim()
 const nftPilotKey = String(process.env.POCKET_CONCIERGE_NFT_PILOT_KEY || '').trim()
+const nftPublicOrderLimiter = new FixedWindowRateLimiter(20, 100, 60_000)
 const nftDemoExternalId = String(process.env.POCKET_CONCIERGE_NFT_DEMO_EXTERNAL_ID || '').trim()
 const nftDemoServicePaymentTx = String(
   process.env.POCKET_CONCIERGE_NFT_DEMO_SERVICE_PAYMENT_TX || '',
@@ -294,6 +296,25 @@ function requireNftPilot(value: string | undefined) {
   )
 }
 
+function nftOrderRequestKey(req: IncomingMessage) {
+  const forwarded = req.headers['x-forwarded-for']
+  const raw = Array.isArray(forwarded) ? forwarded.at(-1) : forwarded
+  const forwardedAddress = raw?.split(',').at(-1)?.trim()
+  return forwardedAddress || req.socket.remoteAddress || 'unknown'
+}
+
+function requireNftOrderRateLimit(req: IncomingMessage, res: ServerResponse) {
+  const result = nftPublicOrderLimiter.consume(nftOrderRequestKey(req))
+  if (!result.allowed) {
+    res.setHeader('Retry-After', String(result.retryAfterSeconds))
+    throw new ConciergeError(
+      'NFT_ORDER_RATE_LIMITED',
+      'Too many NFT order requests. Retry after the disclosed delay.',
+      429,
+    )
+  }
+}
+
 const server = createServer(async (req, res) => {
   try {
     const method = req.method || 'GET'
@@ -343,8 +364,9 @@ const server = createServer(async (req, res) => {
           'NFT_MINT_NOT_CONFIGURED',
           'Pocket NFT Mint & Deliver is disabled until its Ethereum gateway and hardened signer operator are configured.',
           503,
-        )
+      )
       }
+      requireNftOrderRateLimit(req, res)
       requireNftPilot(req.headers['x-pocket-pilot-key'] as string | undefined)
       const requestBody = await body(req)
       await nftService.assertCreatable('okx-marketplace', requestBody)

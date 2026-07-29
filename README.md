@@ -169,7 +169,6 @@ amount from the immutable `fundingAddress` and submits the full Ethereum transac
 overfunding follows the same verified refund accounting:
 
 ```powershell
-$env:POCKET_CONCIERGE_NFT_PILOT_KEY='<pilot access key>'
 node examples/nft-mint-buyer.mjs examples/nft-mint-order.json
 ```
 
@@ -177,10 +176,9 @@ The client validates the exact 1-USDT X Layer challenge, requires a human-readab
 before signing, replays the identical body, and stores the order capability token only in a local
 private output file.
 
-During the controlled pilot, set `POCKET_CONCIERGE_NFT_PILOT_KEY` to a separate secret of at least
-32 characters. Callers must send it as `X-Pocket-Pilot-Key` before Pocket returns an x402 challenge.
-Remove the environment variable only after the mint, delivery, and refund demonstrations pass and the
-service is ready for public orders.
+Public order requests are rate-limited before live-chain validation. Unpaid valid requests receive
+the 1-USDT x402 challenge directly; malformed, unsupported, expired, or over-budget orders are
+rejected before payment.
 
 ```http
 POST /v1/nft-mints/orders/{externalId}/funding
@@ -244,7 +242,6 @@ ETHEREUM_RPC_URL=<private Ethereum mainnet RPC>
 POCKET_CONCIERGE_NFT_TREASURY_ADDRESS=<Ethereum execution treasury>
 POCKET_CONCIERGE_NFT_ORDER_TOKEN_SECRET=<at-least-32-random-characters>
 POCKET_CONCIERGE_NFT_OPERATOR_KEY=<separate-at-least-32-random-characters>
-POCKET_CONCIERGE_NFT_PILOT_KEY=<separate-at-least-32-random-characters>
 POCKET_CONCIERGE_NFT_WORKER_ID=<stable-isolated-signer-worker-id>
 POCKET_CONCIERGE_NFT_WORKER_MAX_FEE_PER_GAS_WEI=<operator-approved Ethereum fee ceiling>
 POCKET_CONCIERGE_NFT_MAX_ORDER_WEI=100000000000000000
