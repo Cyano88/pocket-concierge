@@ -230,6 +230,14 @@ test('previews a supported public mint without creating an order or accepting fu
   assert.equal((await store.get('agent-one', 'opensea-drop-0001')), null)
 })
 
+test('accepts decimal-string integer fields emitted by CLI business parameters', async () => {
+  const { app } = service()
+  const preview = await app.preview(input({ quantity: '1' }))
+
+  assert.equal(preview.supported, true)
+  assert.equal(preview.scope.quantity, 1)
+})
+
 test('previews and binds a future public stage without accepting execution capital', async () => {
   const chain = new FakeChain()
   chain.transaction.stage = {

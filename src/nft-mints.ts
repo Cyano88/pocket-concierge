@@ -98,10 +98,13 @@ function parseUint(value: unknown, name: string) {
 }
 
 function integer(value: unknown, name: string, minimum: number, maximum: number) {
-  if (!Number.isInteger(value) || Number(value) < minimum || Number(value) > maximum) {
+  const parsed = typeof value === 'string' && /^(0|[1-9][0-9]*)$/.test(value)
+    ? Number(value)
+    : value
+  if (!Number.isSafeInteger(parsed) || Number(parsed) < minimum || Number(parsed) > maximum) {
     throw new ConciergeError('NFT_ORDER_INVALID', `${name} must be an integer from ${minimum} to ${maximum}.`)
   }
-  return Number(value)
+  return Number(parsed)
 }
 
 function address(value: unknown, name: string) {
@@ -131,7 +134,10 @@ function validateInput(raw: unknown, now: number): CreateNftMintOrderInput & {
   if (typeof input.collectionSlug !== 'string' || !COLLECTION_SLUG.test(input.collectionSlug)) {
     throw new ConciergeError('NFT_ORDER_INVALID', 'collectionSlug must be a lowercase collection slug.')
   }
-  if (input.quantity !== 1) {
+  const quantity = typeof input.quantity === 'string' && /^(0|[1-9][0-9]*)$/.test(input.quantity)
+    ? Number(input.quantity)
+    : input.quantity
+  if (quantity !== 1) {
     throw new ConciergeError('NFT_QUANTITY_UNSUPPORTED', 'The pilot supports exactly one NFT per order.')
   }
   const maxMintPrice = parseUint(input.maxMintPriceWei, 'maxMintPriceWei')
