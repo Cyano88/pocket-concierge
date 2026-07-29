@@ -73,6 +73,7 @@ async function main() {
   }
 
   const apply = process.argv.includes('--apply')
+  const checkAdminKey = process.argv.includes('--check-admin-key')
   const confirmedWallet = optionalArg('--confirm-wallet')
   if (apply && (!confirmedWallet || getAddress(confirmedWallet) !== walletAddress)) {
     throw new Error(`Apply requires --confirm-wallet ${walletAddress}.`)
@@ -99,6 +100,31 @@ async function main() {
     currentWorkerSignerId: oldWorkerSignerId,
     newWorkerSignerId,
   }
+  let adminAuthorizationKey = ''
+  if (apply || checkAdminKey) {
+    adminAuthorizationKey = requiredEnv(
+      'POCKET_CONCIERGE_NFT_PRIVY_ADMIN_AUTHORIZATION_PRIVATE_KEY',
+    )
+    const derivedAdminPublicKey = derivePrivyAuthorizationPublicKey(adminAuthorizationKey)
+    const ownerQuorum = await client.keyQuorums().get(adminOwnerId)
+    if (
+      ownerQuorum.authorization_keys.length !== 1
+      || normalizePrivyPublicKey(ownerQuorum.authorization_keys[0]?.public_key || '')
+        !== derivedAdminPublicKey
+    ) {
+      throw new Error(
+        'The supplied Policy Admin key does not belong to the configured wallet owner; no update was sent.',
+      )
+    }
+    if (checkAdminKey && !apply) {
+      console.log(JSON.stringify({
+        ok: true,
+        status: 'policy_admin_key_matches_owner',
+        ...plan,
+      }, null, 2))
+      return
+    }
+  }
   if (!apply) {
     console.log(JSON.stringify({
       ok: true,
@@ -107,21 +133,6 @@ async function main() {
       next: `Re-run with --apply --confirm-wallet ${walletAddress}.`,
     }, null, 2))
     return
-  }
-
-  const adminAuthorizationKey = requiredEnv(
-    'POCKET_CONCIERGE_NFT_PRIVY_ADMIN_AUTHORIZATION_PRIVATE_KEY',
-  )
-  const derivedAdminPublicKey = derivePrivyAuthorizationPublicKey(adminAuthorizationKey)
-  const ownerQuorum = await client.keyQuorums().get(adminOwnerId)
-  if (
-    ownerQuorum.authorization_keys.length !== 1
-    || normalizePrivyPublicKey(ownerQuorum.authorization_keys[0]?.public_key || '')
-      !== derivedAdminPublicKey
-  ) {
-    throw new Error(
-      'The supplied Policy Admin key does not belong to the configured wallet owner; no update was sent.',
-    )
   }
   const updated = await client.wallets().update(walletId, {
     additional_signers: [{
