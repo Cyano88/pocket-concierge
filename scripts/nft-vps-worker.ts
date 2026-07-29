@@ -20,6 +20,7 @@ const CONFIRMING_ERRORS = new Set([
   'NFT_DELIVERY_CONFIRMING',
   'NFT_REFUND_CONFIRMING',
 ])
+const WAIT_CHUNK_MS = 30_000
 
 class PocketRequestError extends Error {
   constructor(
@@ -150,6 +151,27 @@ async function submitForVerification(
     `Transaction was broadcast but Pocket verification is incomplete: ${lastError}. `
     + `Recover transaction ${transactionHash}; never prepare or sign a replacement blindly.`,
   )
+}
+
+async function waitForExecutionWindow(notBefore: string | undefined, expiresAt: string) {
+  if (!notBefore) return
+  const executeAt = Date.parse(notBefore)
+  const expiresAtMs = Date.parse(expiresAt)
+  if (!Number.isFinite(executeAt) || !Number.isFinite(expiresAtMs) || executeAt >= expiresAtMs) {
+    throw new Error('Scheduled execution window is invalid.')
+  }
+  while (Date.now() < executeAt) {
+    const remainingMs = executeAt - Date.now()
+    console.log(JSON.stringify({
+      status: 'waiting_for_bound_stage_start',
+      executeAt: notBefore,
+      remainingMs,
+    }))
+    await new Promise(resolve => setTimeout(resolve, Math.min(remainingMs, WAIT_CHUNK_MS)))
+  }
+  if (expiresAtMs - Date.now() < 5_000) {
+    throw new Error('Scheduled plan expired before its safe execution window opened.')
+  }
 }
 
 async function main() {
@@ -308,7 +330,9 @@ async function main() {
     valueWei: plan.transaction.valueWei,
     gasLimit: plan.transaction.gasLimit,
     gasPriceCeilingWei: plan.transaction.maxFeePerGasWei,
+    priorityFeeCeilingWei: plan.transaction.maxPriorityFeePerGasWei,
     nonce: plan.transaction.nonce,
+    ...(plan.notBefore ? { notBefore: plan.notBefore } : {}),
     expiresAt: plan.expiresAt,
   }, null, 2))
 
@@ -332,6 +356,7 @@ async function main() {
   }
 
   try {
+    await waitForExecutionWindow(plan.notBefore, plan.expiresAt)
     const result = await signer.execute(raw, constraints)
     const verified = await submitForVerification(
       baseUrl,

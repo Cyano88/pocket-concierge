@@ -41,7 +41,7 @@ export function assertSignedPlanEnvelope(
 ) {
   const decoded = Transaction.from(serialized)
   if (
-    decoded.type !== 0
+    decoded.type !== 2
     || decoded.chainId !== 1n
     || decoded.nonce !== safeNonce(plan.transaction.nonce)
     || !decoded.from
@@ -51,7 +51,8 @@ export function assertSignedPlanEnvelope(
     || decoded.data.toLowerCase() !== plan.transaction.data.toLowerCase()
     || decoded.value !== BigInt(plan.transaction.valueWei)
     || decoded.gasLimit !== BigInt(plan.transaction.gasLimit)
-    || decoded.gasPrice !== BigInt(plan.transaction.maxFeePerGasWei)
+    || decoded.maxFeePerGas !== BigInt(plan.transaction.maxFeePerGasWei)
+    || decoded.maxPriorityFeePerGas !== BigInt(plan.transaction.maxPriorityFeePerGasWei)
   ) {
     invalid('Signed transaction differs from the validated Pocket execution plan.')
   }
@@ -89,14 +90,15 @@ export class VpsNftSignerBackend implements NftHardenedSignerBackend {
   async signAndBroadcast(plan: ValidatedAssistedPlan) {
     const expectedAddress = await this.address()
     const serialized = await this.options.signer.signTransaction({
-      type: 0,
+      type: 2,
       chainId: 1,
       nonce: safeNonce(plan.transaction.nonce),
       to: plan.transaction.to,
       data: plan.transaction.data,
       value: BigInt(plan.transaction.valueWei),
       gasLimit: BigInt(plan.transaction.gasLimit),
-      gasPrice: BigInt(plan.transaction.maxFeePerGasWei),
+      maxFeePerGas: BigInt(plan.transaction.maxFeePerGasWei),
+      maxPriorityFeePerGas: BigInt(plan.transaction.maxPriorityFeePerGasWei),
     })
     assertSignedPlanEnvelope(serialized, expectedAddress, plan)
     const transactionHash = await this.broadcaster.sendRawTransaction({

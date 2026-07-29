@@ -25,6 +25,7 @@ function plan(): ValidatedAssistedPlan {
       valueWei: '1000000000000000',
       gasLimit: '155996',
       maxFeePerGasWei: '2000000000',
+      maxPriorityFeePerGasWei: '500000000',
       nonce: '7',
     },
   }
@@ -36,18 +37,19 @@ async function signedEnvelope(
 ) {
   const transaction = input.params.transaction
   return wallet.signTransaction({
-    type: 0,
+    type: 2,
     chainId: transaction.chain_id,
     nonce: Number(BigInt(transaction.nonce)),
     to,
     data: transaction.data,
     value: BigInt(transaction.value),
     gasLimit: BigInt(transaction.gas_limit),
-    gasPrice: BigInt(transaction.gas_price),
+    maxFeePerGas: BigInt(transaction.max_fee_per_gas),
+    maxPriorityFeePerGas: BigInt(transaction.max_priority_fee_per_gas),
   })
 }
 
-test('Privy signer requests, verifies, and broadcasts one exact legacy envelope', async () => {
+test('Privy signer requests, verifies, and broadcasts one exact EIP-1559 envelope', async () => {
   let request: Parameters<PrivyTransactionSigner['signTransaction']>[1] | undefined
   let broadcast: Hex | undefined
   const backend = new PrivyNftSignerBackend({
@@ -77,7 +79,9 @@ test('Privy signer requests, verifies, and broadcasts one exact legacy envelope'
   assert.match(result.transactionHash, /^0x[0-9a-f]{64}$/)
   assert.ok(request)
   assert.equal(request.params.transaction.chain_id, 1)
-  assert.equal(request.params.transaction.type, 0)
+  assert.equal(request.params.transaction.type, 2)
+  assert.equal(request.params.transaction.max_fee_per_gas, '0x77359400')
+  assert.equal(request.params.transaction.max_priority_fee_per_gas, '0x1dcd6500')
   assert.equal(request.params.transaction.nonce, '0x7')
   assert.equal(request.params.transaction.value, '0x38d7ea4c68000')
   assert.equal(request.request_expiry, 1_700_000_030_000)

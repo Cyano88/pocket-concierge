@@ -129,6 +129,9 @@ For the first public demo, run one service instance with one persistent volume. 
 
 ## NFT Mint & Deliver pilot
 
+For the launch-scheduled agent flow and the rights-aware wallpaper product, see
+[`docs/NFT_AUTONOMOUS_FLOW.md`](./docs/NFT_AUTONOMOUS_FLOW.md).
+
 The NFT adapter is intentionally disabled by default. Its narrow supported contract is:
 
 - Ethereum mainnet only.

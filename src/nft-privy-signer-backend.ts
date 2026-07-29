@@ -20,14 +20,15 @@ export type PrivyTransactionSigner = {
     input: {
       params: {
         transaction: {
-          type: 0
+          type: 2
           chain_id: number
           from: Address
           to: Address
           data: Hex
           value: string
           gas_limit: string
-          gas_price: string
+          max_fee_per_gas: string
+          max_priority_fee_per_gas: string
           nonce: string
         }
       }
@@ -105,14 +106,15 @@ export class PrivyNftSignerBackend implements NftHardenedSignerBackend {
     const signed = await this.signerClient.signTransaction(this.options.walletId, {
       params: {
         transaction: {
-          type: 0,
+          type: 2,
           chain_id: 1,
           from: this.walletAddress,
           to: plan.transaction.to,
           data: plan.transaction.data,
           value: quantity(plan.transaction.valueWei),
           gas_limit: quantity(plan.transaction.gasLimit),
-          gas_price: quantity(plan.transaction.maxFeePerGasWei),
+          max_fee_per_gas: quantity(plan.transaction.maxFeePerGasWei),
+          max_priority_fee_per_gas: quantity(plan.transaction.maxPriorityFeePerGasWei),
           nonce: quantity(plan.transaction.nonce),
         },
       },

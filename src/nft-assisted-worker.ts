@@ -31,7 +31,9 @@ export type AssistedTransaction = {
   valueWei: string
   gasLimit: string
   maxFeePerGasWei: string
+  maxPriorityFeePerGasWei: string
   nonce: string
+  notBefore?: string
 }
 
 export type ValidatedAssistedPlan = {
@@ -40,6 +42,7 @@ export type ValidatedAssistedPlan = {
   orderId: string
   planId: string
   expiresAt: string
+  notBefore?: string
   transaction: AssistedTransaction
 }
 
@@ -187,8 +190,24 @@ export function validateAssistedNftPlan(
   const planGasLimit = uint(plan.gasLimit, 'plan.gasLimit')
   const maxFeePerGasWei = uint(transaction.maxFeePerGasWei, 'execution.transaction.maxFeePerGasWei')
   const planMaxFeePerGasWei = uint(plan.maxFeePerGasWei, 'plan.maxFeePerGasWei')
-  if (valueWei !== planValueWei || gasLimit !== planGasLimit || maxFeePerGasWei !== planMaxFeePerGasWei) {
-    fail('Transaction value, gas limit, or maximum fee does not match the signed plan.')
+  const maxPriorityFeePerGasWei = uint(
+    transaction.maxPriorityFeePerGasWei ?? transaction.maxFeePerGasWei,
+    'execution.transaction.maxPriorityFeePerGasWei',
+  )
+  const planMaxPriorityFeePerGasWei = uint(
+    plan.maxPriorityFeePerGasWei ?? plan.maxFeePerGasWei,
+    'plan.maxPriorityFeePerGasWei',
+  )
+  if (
+    valueWei !== planValueWei
+    || gasLimit !== planGasLimit
+    || maxFeePerGasWei !== planMaxFeePerGasWei
+    || maxPriorityFeePerGasWei !== planMaxPriorityFeePerGasWei
+  ) {
+    fail('Transaction value, gas limit, or EIP-1559 fee ceilings do not match the signed plan.')
+  }
+  if (maxPriorityFeePerGasWei > maxFeePerGasWei) {
+    fail('Maximum priority fee per gas cannot exceed maximum fee per gas.')
   }
   if (gasLimit > uint(configuredGasCeiling(constraints), 'configured gas ceiling')) {
     fail('Transaction gas limit exceeds the operator ceiling.')
@@ -204,6 +223,19 @@ export function validateAssistedNftPlan(
   const executionAttempt = uint(String(plan.executionAttempt), 'plan.executionAttempt')
   if (executionAttempt < 1n) fail('Execution attempt must be positive.')
   const leaseExpiresAt = text(plan.leaseExpiresAt, 'plan.leaseExpiresAt')
+  let notBefore: string | undefined
+  if (plan.notBefore !== undefined || transaction.notBefore !== undefined) {
+    if (constraints.action !== 'mint') fail('Only mint plans may declare notBefore.')
+    notBefore = text(plan.notBefore, 'plan.notBefore')
+    const transactionNotBefore = text(transaction.notBefore, 'execution.transaction.notBefore')
+    const schedule = object(order.schedule, 'execution.order.schedule')
+    const stageStartTime = text(schedule.stageStartTime, 'execution.order.schedule.stageStartTime')
+    if (transactionNotBefore !== notBefore || stageStartTime !== notBefore) {
+      fail('Plan, transaction, and immutable schedule notBefore values must match.')
+    }
+    const notBeforeMs = Date.parse(notBefore)
+    if (!Number.isFinite(notBeforeMs)) fail('Plan notBefore timestamp is invalid.')
+  }
 
   const createdAt = text(plan.createdAt, 'plan.createdAt')
   const expiresAt = text(plan.expiresAt, 'plan.expiresAt')
@@ -287,6 +319,7 @@ export function validateAssistedNftPlan(
     orderId,
     planId,
     expiresAt,
+    ...(notBefore ? { notBefore } : {}),
     transaction: {
       chainId: 1,
       from,
@@ -295,7 +328,9 @@ export function validateAssistedNftPlan(
       valueWei: valueWei.toString(),
       gasLimit: gasLimit.toString(),
       maxFeePerGasWei: maxFeePerGasWei.toString(),
+      maxPriorityFeePerGasWei: maxPriorityFeePerGasWei.toString(),
       nonce: nonce.toString(),
+      ...(notBefore ? { notBefore } : {}),
     },
   }
 }

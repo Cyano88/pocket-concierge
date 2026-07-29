@@ -40,6 +40,18 @@ const MINT_HASH = `0x${'b'.repeat(64)}` as Hex
 const DELIVERY_HASH = `0x${'c'.repeat(64)}` as Hex
 const REFUND_HASH = `0x${'d'.repeat(64)}` as Hex
 const NOW = Date.parse('2026-07-26T10:00:00.000Z')
+const PUBLIC_STAGE: BuiltMintTransaction['stage'] = {
+  startTime: '2026-07-26T09:00:00.000Z',
+  endTime: '2026-07-26T12:00:00.000Z',
+  maxTotalMintableByWallet: '5',
+  currentWalletMints: '0',
+  currentTotalSupply: '10',
+  maxSupply: '1000',
+  restrictFeeRecipients: false,
+  feeRecipient: CREATOR,
+  checkedAt: '2026-07-26T10:00:00.000Z',
+  active: true,
+}
 
 const mintCalldata = encodeFunctionData({
   abi: [{
@@ -81,6 +93,7 @@ class FakeChain implements NftChainGateway {
     target: SEADROP_1_0,
     calldata: mintCalldata,
     valueWei: '10000000000000000',
+    stage: PUBLIC_STAGE,
   }
 
   deposit: VerifiedDeposit = {
@@ -103,6 +116,7 @@ class FakeChain implements NftChainGateway {
     blockNumber: 101n,
     gasCostWei: 2_000_000_000_000_000n,
     confirmations: 2,
+    blockTimestamp: Math.floor(Date.parse('2026-07-26T10:00:30.000Z') / 1000),
   }
 
   failedMint: VerifiedFailedMint = {
@@ -188,6 +202,7 @@ function service(
       treasuryAddress: TREASURY,
       minimumConfirmations: 2,
       planTtlSeconds: 30,
+      schedulePrepareLeadSeconds: 30,
       deliveryGasLimit: 120_000n,
       refundGasLimit: 21_000n,
       maximumOrderWei: 100_000_000_000_000_000n,
@@ -213,6 +228,111 @@ test('previews a supported public mint without creating an order or accepting fu
   assert.equal(preview.quote.serviceFee.amountAtomic, '1000000')
   assert.equal(preview.mandate.withinLimits, true)
   assert.equal((await store.get('agent-one', 'opensea-drop-0001')), null)
+})
+
+test('previews and binds a future public stage without accepting execution capital', async () => {
+  const chain = new FakeChain()
+  chain.transaction.stage = {
+    ...PUBLIC_STAGE,
+    startTime: '2026-07-26T10:10:00.000Z',
+    endTime: '2026-07-26T11:10:00.000Z',
+    active: false,
+  }
+  const { app, store } = service(new MemoryNftMintStore(), chain)
+  const preview = await app.preview(input({
+    executionMode: 'scheduled',
+    executionWindowSeconds: 180,
+    maxFeePerGasWei: '60000000000',
+    maxPriorityFeePerGasWei: '3000000000',
+    maxReplacementAttempts: 0,
+  }))
+
+  assert.equal(preview.scope.executionMode, 'scheduled')
+  assert.equal(preview.schedule?.stageStartTime, '2026-07-26T10:10:00.000Z')
+  assert.equal(preview.schedule?.executionDeadline, '2026-07-26T10:13:00.000Z')
+  assert.equal(preview.schedule?.maxReplacementAttempts, 0)
+  assert.match(preview.schedule?.stageSnapshotHash ?? '', /^[a-f0-9]{64}$/)
+  assert.equal((await store.get('agent-one', 'opensea-drop-0001')), null)
+})
+
+test('pre-funded scheduled order prepares once inside the bounded launch lead window', async () => {
+  let currentTime = NOW
+  const chain = new FakeChain()
+  chain.transaction.stage = {
+    ...PUBLIC_STAGE,
+    startTime: '2026-07-26T10:10:00.000Z',
+    endTime: '2026-07-26T11:10:00.000Z',
+    active: false,
+  }
+  const { app } = service(
+    new MemoryNftMintStore(),
+    chain,
+    () => currentTime,
+  )
+  const scheduledInput = input({
+    executionMode: 'scheduled',
+    executionWindowSeconds: 180,
+    maxFeePerGasWei: '60000000000',
+    maxPriorityFeePerGasWei: '3000000000',
+    maxReplacementAttempts: 0,
+  })
+  await app.create('agent-one', scheduledInput)
+  const funded = await app.confirmFunding(
+    'agent-one',
+    'opensea-drop-0001',
+    { depositTransactionHash: DEPOSIT_HASH },
+  )
+  assert.equal(funded.state, 'scheduled')
+
+  const [queued] = await app.workQueue('agent-one')
+  assert.equal(queued?.action, 'mint')
+  assert.equal(queued?.executeAt, '2026-07-26T10:10:00.000Z')
+  assert.equal(queued?.prepareAt, '2026-07-26T10:09:30.000Z')
+
+  await assert.rejects(
+    app.prepareExecution('agent-one', 'opensea-drop-0001', 'worker-test-1'),
+    (error: unknown) => (error as { code?: string }).code === 'NFT_SCHEDULE_PREPARE_EARLY',
+  )
+
+  currentTime = Date.parse('2026-07-26T10:09:30.000Z')
+  chain.transaction.stage.checkedAt = '2026-07-26T10:09:24.000Z'
+  chain.transaction.stage.currentTotalSupply = '999'
+  const prepared = await app.prepareExecution(
+    'agent-one',
+    'opensea-drop-0001',
+    'worker-test-1',
+  )
+  assert.equal(prepared.order.state, 'minting')
+  assert.equal(prepared.order.executionPlan?.notBefore, '2026-07-26T10:10:00.000Z')
+  assert.equal(prepared.transaction.notBefore, '2026-07-26T10:10:00.000Z')
+})
+
+test('scheduled execution blocks stable stage-configuration drift before signing', async () => {
+  let currentTime = NOW
+  const chain = new FakeChain()
+  chain.transaction.stage = {
+    ...PUBLIC_STAGE,
+    startTime: '2026-07-26T10:10:00.000Z',
+    endTime: '2026-07-26T11:10:00.000Z',
+    active: false,
+  }
+  const { app } = service(new MemoryNftMintStore(), chain, () => currentTime)
+  await app.create('agent-one', input({
+    executionMode: 'scheduled',
+    maxFeePerGasWei: '60000000000',
+    maxPriorityFeePerGasWei: '3000000000',
+  }))
+  await app.confirmFunding(
+    'agent-one',
+    'opensea-drop-0001',
+    { depositTransactionHash: DEPOSIT_HASH },
+  )
+  currentTime = Date.parse('2026-07-26T10:09:30.000Z')
+  chain.transaction.valueWei = '11000000000000000'
+  await assert.rejects(
+    app.prepareExecution('agent-one', 'opensea-drop-0001', 'worker-test-1'),
+    (error: unknown) => (error as { code?: string }).code === 'NFT_SCHEDULE_STAGE_DRIFT',
+  )
 })
 
 test('preview rejects a live total-cost estimate outside the customer mandate', async () => {
@@ -291,13 +411,13 @@ test('rejects unsafe order shapes before accepting execution capital', async () 
 test('SeaDrop validator rejects target, collection, recipient, and quantity mutations', () => {
   const gateway = new EthereumNftChainGateway('http://127.0.0.1:8545')
   assert.doesNotThrow(() => gateway.validateMint(
-    { target: SEADROP_1_0, calldata: mintCalldata, valueWei: '0' },
+    { target: SEADROP_1_0, calldata: mintCalldata, valueWei: '0', stage: PUBLIC_STAGE },
     NFT,
     TREASURY,
   ))
   assert.throws(
     () => gateway.validateMint(
-      { target: NFT, calldata: mintCalldata, valueWei: '0' },
+      { target: NFT, calldata: mintCalldata, valueWei: '0', stage: PUBLIC_STAGE },
       NFT,
       TREASURY,
     ),
@@ -321,7 +441,7 @@ test('SeaDrop validator rejects target, collection, recipient, and quantity muta
   })
   assert.throws(
     () => gateway.validateMint(
-      { target: SEADROP_1_0, calldata: wrongCollection, valueWei: '0' },
+      { target: SEADROP_1_0, calldata: wrongCollection, valueWei: '0', stage: PUBLIC_STAGE },
       NFT,
       TREASURY,
     ),
@@ -345,7 +465,7 @@ test('SeaDrop validator rejects target, collection, recipient, and quantity muta
   })
   assert.throws(
     () => gateway.validateMint(
-      { target: SEADROP_1_0, calldata: wrongRecipient, valueWei: '0' },
+      { target: SEADROP_1_0, calldata: wrongRecipient, valueWei: '0', stage: PUBLIC_STAGE },
       NFT,
       TREASURY,
     ),

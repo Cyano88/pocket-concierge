@@ -1,6 +1,7 @@
 export type NftMintState =
   | 'awaiting_funding'
   | 'armed'
+  | 'scheduled'
   | 'minting'
   | 'delivering'
   | 'delivered'
@@ -19,13 +20,27 @@ export type MintExecutionPlan = {
   valueWei: string
   gasLimit: string
   maxFeePerGasWei: string
+  maxPriorityFeePerGasWei: string
   transactionNonce: string
   leaseOwner: string
   leaseExpiresAt: string
   executionAttempt: number
   maximumExecutionCostWei: string
+  notBefore?: string
   createdAt: string
   expiresAt: string
+}
+
+export type NftMintSchedule = {
+  mode: 'scheduled'
+  stageStartTime: string
+  stageEndTime: string
+  executionDeadline: string
+  executionWindowSeconds: number
+  maxFeePerGasWei: string
+  maxPriorityFeePerGasWei: string
+  maxReplacementAttempts: number
+  stageSnapshotHash: string
 }
 
 export type TransferExecutionPlan = {
@@ -35,6 +50,7 @@ export type TransferExecutionPlan = {
   valueWei: string
   gasLimit: string
   maxFeePerGasWei: string
+  maxPriorityFeePerGasWei: string
   transactionNonce: string
   leaseOwner: string
   leaseExpiresAt: string
@@ -63,6 +79,8 @@ export type NftMintOrder = {
   maxTotalCostWei: string
   requiredDepositWei: string
   expiresAt: string
+  executionMode: 'immediate' | 'scheduled'
+  schedule?: NftMintSchedule
   createdAt: string
   updatedAt: string
   deposit?: {
@@ -81,6 +99,8 @@ export type NftMintOrder = {
     blockNumber: string
     gasCostWei: string
     transactionNonce: string
+    includedAt?: string
+    stageStartDelayMs?: number
     confirmedAt: string
   }
   failedMint?: {
@@ -127,12 +147,29 @@ export type CreateNftMintOrderInput = {
   maxMintPriceWei: string
   maxTotalCostWei: string
   expiresAt: string
+  executionMode?: 'immediate' | 'scheduled'
+  executionWindowSeconds?: number
+  maxFeePerGasWei?: string
+  maxPriorityFeePerGasWei?: string
+  maxReplacementAttempts?: number
 }
 
 export type BuiltMintTransaction = {
   target: `0x${string}`
   calldata: `0x${string}`
   valueWei: string
+  stage: {
+    startTime: string
+    endTime: string
+    maxTotalMintableByWallet: string
+    currentWalletMints: string
+    currentTotalSupply: string
+    maxSupply: string
+    restrictFeeRecipients: boolean
+    feeRecipient: `0x${string}`
+    checkedAt: string
+    active: boolean
+  }
 }
 
 export type VerifiedDeposit = {
@@ -155,6 +192,7 @@ export type VerifiedMint = {
   blockNumber: bigint
   gasCostWei: bigint
   confirmations: number
+  blockTimestamp: number
 }
 
 export type VerifiedFailedMint = {

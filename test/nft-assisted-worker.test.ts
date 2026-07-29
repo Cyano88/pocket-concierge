@@ -131,6 +131,24 @@ test('assisted worker validates bounded mint, delivery, and refund plans', () =>
   assert.equal(validate(response('refund'), 'refund').transaction.to, REFUND)
 })
 
+test('assisted worker binds scheduled execution to one immutable stage start', () => {
+  const value = response()
+  const notBefore = new Date(NOW + 10_000).toISOString()
+  const plan = (value.execution.order.executionPlan as Record<string, unknown>)
+  plan.notBefore = notBefore
+  const order = value.execution.order as Record<string, unknown>
+  const transaction = value.execution.transaction as Record<string, unknown>
+  order.schedule = { stageStartTime: notBefore }
+  transaction.notBefore = notBefore
+  assert.equal(validate(value).notBefore, notBefore)
+
+  transaction.notBefore = new Date(NOW + 11_000).toISOString()
+  assert.throws(
+    () => validate(value),
+    (error: unknown) => (error as { code?: string }).code === 'NFT_WORKER_PLAN_INVALID',
+  )
+})
+
 test('assisted worker rejects chain, treasury, target, calldata, fee, and expiry drift', () => {
   for (const mutate of [
     (value: ReturnType<typeof response>) => { value.execution.transaction.chainId = 196 as 1 },

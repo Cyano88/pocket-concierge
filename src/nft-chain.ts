@@ -75,10 +75,16 @@ function transactionCost(receipt: { gasUsed: bigint; effectiveGasPrice: bigint }
 }
 
 export interface NftChainGateway {
-  buildMint(collectionSlug: string, nftContract: Address, treasuryAddress: Address): Promise<BuiltMintTransaction>
+  buildMint(
+    collectionSlug: string,
+    nftContract: Address,
+    treasuryAddress: Address,
+    options?: { allowUpcoming?: boolean },
+  ): Promise<BuiltMintTransaction>
   validateMint(transaction: BuiltMintTransaction, nftContract: Address, treasuryAddress: Address): void
   estimateMintGas(transaction: BuiltMintTransaction, treasuryAddress: Address): Promise<bigint>
   maxFeePerGas(): Promise<bigint>
+  maxPriorityFeePerGas?(): Promise<bigint>
   pendingNonce(address: Address): Promise<number>
   verifyDeposit(transactionHash: Hex): Promise<VerifiedDeposit>
   verifyMint(transactionHash: Hex, nftContract: Address, treasuryAddress: Address): Promise<VerifiedMint>
@@ -122,6 +128,7 @@ export class EthereumNftChainGateway implements NftChainGateway {
     _collectionSlug: string,
     nftContract: Address,
     treasuryAddress: Address,
+    options: { allowUpcoming?: boolean } = {},
   ): Promise<BuiltMintTransaction> {
     let publicDrop
     let mintStats
@@ -173,7 +180,8 @@ export class EthereumNftChainGateway implements NftChainGateway {
       restrictFeeRecipients,
     ] = publicDrop
     const [minterNumMinted, currentTotalSupply, maxSupply] = mintStats
-    if (block.timestamp < startTime || block.timestamp > endTime) {
+    const active = block.timestamp >= startTime && block.timestamp <= endTime
+    if (block.timestamp > endTime || (!options.allowUpcoming && !active)) {
       throw new ConciergeError('NFT_PUBLIC_DROP_INACTIVE', 'The SeaDrop public mint stage is not active.', 409)
     }
     if (minterNumMinted + 1n > maxTotalMintableByWallet) {
@@ -210,7 +218,23 @@ export class EthereumNftChainGateway implements NftChainGateway {
       functionName: 'mintPublic',
       args: [nftContract, feeRecipient, ZERO_ADDRESS, 1n],
     })
-    return { target: SEADROP_1_0, calldata, valueWei: mintPrice.toString() }
+    return {
+      target: SEADROP_1_0,
+      calldata,
+      valueWei: mintPrice.toString(),
+      stage: {
+        startTime: new Date(Number(startTime) * 1000).toISOString(),
+        endTime: new Date(Number(endTime) * 1000).toISOString(),
+        maxTotalMintableByWallet: maxTotalMintableByWallet.toString(),
+        currentWalletMints: minterNumMinted.toString(),
+        currentTotalSupply: currentTotalSupply.toString(),
+        maxSupply: maxSupply.toString(),
+        restrictFeeRecipients,
+        feeRecipient,
+        checkedAt: new Date(Number(block.timestamp) * 1000).toISOString(),
+        active,
+      },
+    }
   }
 
   validateMint(transaction: BuiltMintTransaction, nftContract: Address, treasuryAddress: Address) {
@@ -257,6 +281,13 @@ export class EthereumNftChainGateway implements NftChainGateway {
     const fees = await this.client.estimateFeesPerGas()
     if (fees.maxFeePerGas) return fees.maxFeePerGas
     return this.client.getGasPrice()
+  }
+
+  async maxPriorityFeePerGas() {
+    const fees = await this.client.estimateFeesPerGas()
+    if (fees.maxPriorityFeePerGas) return fees.maxPriorityFeePerGas
+    const maxFeePerGas = fees.maxFeePerGas ?? await this.client.getGasPrice()
+    return maxFeePerGas < 2_000_000_000n ? maxFeePerGas : 2_000_000_000n
   }
 
   async verifyDeposit(transactionHash: Hex): Promise<VerifiedDeposit> {
@@ -308,6 +339,7 @@ export class EthereumNftChainGateway implements NftChainGateway {
     if (tokenId === undefined) {
       throw new ConciergeError('NFT_MINT_DELIVERABLE_MISSING', 'Mint receipt contains no matching NFT minted to the treasury.', 409)
     }
+    const includedBlock = await this.client.getBlock({ blockNumber: receipt.blockNumber })
     return {
       transactionHash,
       from: getAddress(transaction.from),
@@ -319,6 +351,7 @@ export class EthereumNftChainGateway implements NftChainGateway {
       blockNumber: receipt.blockNumber,
       gasCostWei: transactionCost(receipt),
       confirmations: Number(blockNumber - receipt.blockNumber + 1n),
+      blockTimestamp: Number(includedBlock.timestamp),
     }
   }
 

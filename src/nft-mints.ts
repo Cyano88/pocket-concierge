@@ -52,6 +52,15 @@ export const NFT_MINT_ORDER_OUTPUT_SCHEMA = {
         maxMintPriceWei: { type: 'string', pattern: '^(0|[1-9][0-9]*)$' },
         maxTotalCostWei: { type: 'string', pattern: '^[1-9][0-9]*$' },
         expiresAt: { type: 'string', format: 'date-time' },
+        executionMode: {
+          type: 'string',
+          enum: ['immediate', 'scheduled'],
+          description: 'Use scheduled only for a future onchain public stage.',
+        },
+        executionWindowSeconds: { type: 'integer', minimum: 30, maximum: 1800 },
+        maxFeePerGasWei: { type: 'string', pattern: '^[1-9][0-9]*$' },
+        maxPriorityFeePerGasWei: { type: 'string', pattern: '^[1-9][0-9]*$' },
+        maxReplacementAttempts: { type: 'integer', minimum: 0, maximum: 0 },
       },
     },
   },
@@ -69,6 +78,7 @@ type NftMintDependencies = {
   treasuryAddress: Address
   minimumConfirmations: number
   planTtlSeconds: number
+  schedulePrepareLeadSeconds: number
   deliveryGasLimit: bigint
   refundGasLimit: bigint
   maximumOrderWei: bigint
@@ -85,6 +95,13 @@ function parseUint(value: unknown, name: string) {
     throw new ConciergeError('NFT_ORDER_INVALID', `${name} must be a non-negative decimal integer string.`)
   }
   return BigInt(value)
+}
+
+function integer(value: unknown, name: string, minimum: number, maximum: number) {
+  if (!Number.isInteger(value) || Number(value) < minimum || Number(value) > maximum) {
+    throw new ConciergeError('NFT_ORDER_INVALID', `${name} must be an integer from ${minimum} to ${maximum}.`)
+  }
+  return Number(value)
 }
 
 function address(value: unknown, name: string) {
@@ -129,6 +146,55 @@ function validateInput(raw: unknown, now: number): CreateNftMintOrderInput & {
   if (!Number.isFinite(expiresAt) || expiresAt < now + 120_000 || expiresAt > now + 30 * 24 * 60 * 60 * 1000) {
     throw new ConciergeError('NFT_ORDER_INVALID', 'expiresAt must be between 2 minutes and 30 days from now.')
   }
+  const executionMode = input.executionMode ?? 'immediate'
+  if (executionMode !== 'immediate' && executionMode !== 'scheduled') {
+    throw new ConciergeError('NFT_ORDER_INVALID', 'executionMode must be immediate or scheduled.')
+  }
+  const normalizedExecution = executionMode === 'scheduled'
+    ? (() => {
+        const maxFeePerGasWei = parseUint(input.maxFeePerGasWei, 'maxFeePerGasWei')
+        const maxPriorityFeePerGasWei = parseUint(
+          input.maxPriorityFeePerGasWei,
+          'maxPriorityFeePerGasWei',
+        )
+        if (
+          maxFeePerGasWei === 0n
+          || maxPriorityFeePerGasWei === 0n
+          || maxPriorityFeePerGasWei > maxFeePerGasWei
+        ) {
+          throw new ConciergeError(
+            'NFT_ORDER_INVALID',
+            'Scheduled gas ceilings must be positive and priority fee cannot exceed maximum fee.',
+          )
+        }
+        return {
+          executionMode: 'scheduled' as const,
+          executionWindowSeconds: input.executionWindowSeconds === undefined
+            ? 300
+            : integer(input.executionWindowSeconds, 'executionWindowSeconds', 30, 1800),
+          maxFeePerGasWei: maxFeePerGasWei.toString(),
+          maxPriorityFeePerGasWei: maxPriorityFeePerGasWei.toString(),
+          maxReplacementAttempts: input.maxReplacementAttempts === undefined
+            ? 0
+            : integer(input.maxReplacementAttempts, 'maxReplacementAttempts', 0, 0),
+        }
+      })()
+    : (() => {
+        for (const field of [
+          'executionWindowSeconds',
+          'maxFeePerGasWei',
+          'maxPriorityFeePerGasWei',
+          'maxReplacementAttempts',
+        ]) {
+          if (input[field] !== undefined) {
+            throw new ConciergeError(
+              'NFT_ORDER_INVALID',
+              `${field} is accepted only when executionMode is scheduled.`,
+            )
+          }
+        }
+        return { executionMode: 'immediate' as const }
+      })()
   return {
     externalId: input.externalId,
     collectionSlug: input.collectionSlug,
@@ -140,6 +206,7 @@ function validateInput(raw: unknown, now: number): CreateNftMintOrderInput & {
     maxMintPriceWei: maxMintPrice.toString(),
     maxTotalCostWei: maxTotalCost.toString(),
     expiresAt: new Date(expiresAt).toISOString(),
+    ...normalizedExecution,
   }
 }
 
@@ -148,27 +215,92 @@ function publicOrder(order: NftMintOrder) {
   return visible
 }
 
+function stableStageSnapshot(nftContract: Address, transaction: BuiltMintTransaction) {
+  return {
+    nftContract,
+    mintPriceWei: transaction.valueWei,
+    startTime: transaction.stage.startTime,
+    endTime: transaction.stage.endTime,
+    maxTotalMintableByWallet: transaction.stage.maxTotalMintableByWallet,
+    restrictFeeRecipients: transaction.stage.restrictFeeRecipients,
+    feeRecipient: transaction.stage.feeRecipient,
+  }
+}
+
 export class NftMintService {
   constructor(private readonly dependencies: NftMintDependencies) {}
 
-  async preview(raw: unknown) {
-    const input = validateInput(raw, this.dependencies.now())
-    this.assertOrderLimit(input)
+  private schedule(
+    input: ReturnType<typeof validateInput>,
+    transaction: BuiltMintTransaction,
+  ) {
+    if (input.executionMode !== 'scheduled') return undefined
+    const now = this.dependencies.now()
+    const stageStart = Date.parse(transaction.stage.startTime)
+    const stageEnd = Date.parse(transaction.stage.endTime)
+    if (transaction.stage.active || stageStart <= now) {
+      throw new ConciergeError(
+        'NFT_SCHEDULE_NOT_FUTURE',
+        'Scheduled execution requires a future SeaDrop public stage; use immediate mode for an active stage.',
+        409,
+      )
+    }
+    const executionDeadline = Math.min(
+      stageStart + input.executionWindowSeconds! * 1000,
+      stageEnd,
+      Date.parse(input.expiresAt),
+    )
+    if (executionDeadline <= stageStart) {
+      throw new ConciergeError(
+        'NFT_SCHEDULE_WINDOW_INVALID',
+        'Order expiry must extend beyond the scheduled public-stage opening.',
+        409,
+      )
+    }
+    return {
+      mode: 'scheduled' as const,
+      stageStartTime: transaction.stage.startTime,
+      stageEndTime: transaction.stage.endTime,
+      executionDeadline: new Date(executionDeadline).toISOString(),
+      executionWindowSeconds: input.executionWindowSeconds!,
+      maxFeePerGasWei: input.maxFeePerGasWei!,
+      maxPriorityFeePerGasWei: input.maxPriorityFeePerGasWei!,
+      maxReplacementAttempts: input.maxReplacementAttempts!,
+      stageSnapshotHash: digest(stableStageSnapshot(input.nftContract, transaction)),
+    }
+  }
+
+  private async inspect(input: ReturnType<typeof validateInput>) {
     const transaction = await this.dependencies.chain.buildMint(
       input.collectionSlug,
       input.nftContract,
       this.dependencies.treasuryAddress,
+      { allowUpcoming: input.executionMode === 'scheduled' },
     )
     this.dependencies.chain.validateMint(
       transaction,
       input.nftContract,
       this.dependencies.treasuryAddress,
     )
+    return { transaction, schedule: this.schedule(input, transaction) }
+  }
+
+  async preview(raw: unknown) {
+    const input = validateInput(raw, this.dependencies.now())
+    this.assertOrderLimit(input)
+    const { transaction, schedule } = await this.inspect(input)
     const mintPriceWei = BigInt(transaction.valueWei)
     if (mintPriceWei > BigInt(input.maxMintPriceWei)) {
       throw new ConciergeError('NFT_MINT_PRICE_LIMIT', 'Current mint price exceeds the customer mandate.', 409)
     }
     const { mintGasLimit, maxFeePerGas, estimationMode } = await this.estimateExecution(transaction, true)
+    if (schedule && maxFeePerGas > BigInt(schedule.maxFeePerGasWei)) {
+      throw new ConciergeError(
+        'NFT_SCHEDULE_GAS_LIMIT',
+        'Current maximum fee estimate exceeds the scheduled customer gas ceiling.',
+        409,
+      )
+    }
     const maximumEstimatedTotalWei = mintPriceWei + maxFeePerGas * (
       mintGasLimit + this.dependencies.deliveryGasLimit + this.dependencies.refundGasLimit
     )
@@ -184,6 +316,7 @@ export class NftMintService {
       chainId: 1,
       treasuryAddress: this.dependencies.treasuryAddress,
       requiredDepositWei: input.maxTotalCostWei,
+      ...(schedule ? { schedule } : {}),
     }
     return {
       supported: true,
@@ -192,6 +325,7 @@ export class NftMintService {
         network: 'ethereum-mainnet',
         mintMechanism: 'official-seadrop-1.0-public-drop',
         quantity: 1,
+        executionMode: input.executionMode,
       },
       quote: {
         currentMintPriceWei: mintPriceWei.toString(),
@@ -214,6 +348,7 @@ export class NftMintService {
         expiresAt: input.expiresAt,
         withinLimits: true,
       },
+      ...(schedule ? { schedule } : {}),
       next: {
         action: 'create_paid_order',
         endpoint: NFT_MINT_ORDER_ROUTE,
@@ -225,11 +360,13 @@ export class NftMintService {
   async assertCreatable(ownerId: string, raw: unknown) {
     const input = validateInput(raw, this.dependencies.now())
     this.assertOrderLimit(input)
+    const { schedule } = await this.inspect(input)
     const manifestHash = digest({
       ...input,
       chainId: 1,
       treasuryAddress: this.dependencies.treasuryAddress,
       requiredDepositWei: input.maxTotalCostWei,
+      ...(schedule ? { schedule } : {}),
     })
     const existing = await this.dependencies.store.get(ownerId, input.externalId)
     if (existing && existing.manifestHash !== manifestHash) {
@@ -241,11 +378,13 @@ export class NftMintService {
     const now = this.dependencies.now()
     const input = validateInput(raw, now)
     this.assertOrderLimit(input)
+    const { schedule } = await this.inspect(input)
     const immutable = {
       ...input,
       chainId: 1,
       treasuryAddress: this.dependencies.treasuryAddress,
       requiredDepositWei: input.maxTotalCostWei,
+      ...(schedule ? { schedule } : {}),
     }
     const manifestHash = digest(immutable)
     const createdAt = new Date(now).toISOString()
@@ -268,6 +407,8 @@ export class NftMintService {
       maxTotalCostWei: input.maxTotalCostWei,
       requiredDepositWei: input.maxTotalCostWei,
       expiresAt: input.expiresAt,
+      executionMode: input.executionMode ?? 'immediate',
+      ...(schedule ? { schedule } : {}),
       createdAt,
       updatedAt: createdAt,
     }
@@ -289,6 +430,7 @@ export class NftMintService {
   async workQueue(ownerId: string) {
     const orders = await this.dependencies.store.list([
       'armed',
+      'scheduled',
       'minting',
       'delivering',
       'delivered',
@@ -301,7 +443,7 @@ export class NftMintService {
       .map(order => ({
         externalId: order.externalId,
         state: order.state,
-        action: order.state === 'armed' || order.state === 'minting'
+        action: order.state === 'armed' || order.state === 'scheduled' || order.state === 'minting'
           ? 'mint'
           : order.state === 'delivering'
             ? 'deliver'
@@ -312,6 +454,14 @@ export class NftMintService {
           || (order.state === 'refunding' && Boolean(order.refundPlan))
         ),
         updatedAt: order.updatedAt,
+        ...(order.schedule ? {
+          executeAt: order.schedule.stageStartTime,
+          executionDeadline: order.schedule.executionDeadline,
+          prepareAt: new Date(
+            Date.parse(order.schedule.stageStartTime)
+              - this.dependencies.schedulePrepareLeadSeconds * 1000,
+          ).toISOString(),
+        } : {}),
       }))
   }
 
@@ -447,7 +597,9 @@ export class NftMintService {
 
   async confirmFunding(ownerId: string, externalId: string, raw: unknown) {
     const order = await this.requireOrder(ownerId, externalId)
-    if (order.state === 'armed' && order.deposit) return publicOrder(order)
+    if ((order.state === 'armed' || order.state === 'scheduled') && order.deposit) {
+      return publicOrder(order)
+    }
     if (order.state !== 'awaiting_funding') {
       throw new ConciergeError('NFT_ORDER_STATE_INVALID', `Funding cannot be confirmed while order is ${order.state}.`, 409)
     }
@@ -478,7 +630,7 @@ export class NftMintService {
       )
     }
     const expectedRevision = order.revision
-    order.state = 'armed'
+    order.state = order.schedule ? 'scheduled' : 'armed'
     order.revision += 1
     order.updatedAt = new Date(this.dependencies.now()).toISOString()
     order.deposit = {
@@ -515,6 +667,7 @@ export class NftMintService {
         order.collectionSlug,
         order.nftContract,
         order.treasuryAddress,
+        { allowUpcoming: Boolean(order.schedule) },
       )
       this.dependencies.chain.validateMint(transaction, order.nftContract, order.treasuryAddress)
       if (
@@ -538,12 +691,35 @@ export class NftMintService {
           valueWei: order.executionPlan.valueWei,
           gasLimit: order.executionPlan.gasLimit,
           maxFeePerGasWei: order.executionPlan.maxFeePerGasWei,
+          maxPriorityFeePerGasWei: order.executionPlan.maxPriorityFeePerGasWei,
           nonce: order.executionPlan.transactionNonce,
         },
       }
     }
-    if (order.state !== 'armed' || !order.deposit) {
+    if (
+      (order.state !== 'armed' && order.state !== 'scheduled')
+      || !order.deposit
+    ) {
       throw new ConciergeError('NFT_ORDER_NOT_ARMED', 'A confirmed Ethereum deposit is required before mint preparation.', 409)
+    }
+    if (order.schedule) {
+      const prepareAt = Date.parse(order.schedule.stageStartTime)
+        - this.dependencies.schedulePrepareLeadSeconds * 1000
+      if (now < prepareAt) {
+        throw new ConciergeError(
+          'NFT_SCHEDULE_PREPARE_EARLY',
+          `Scheduled mint preparation opens at ${new Date(prepareAt).toISOString()}.`,
+          409,
+        )
+      }
+      if (now > Date.parse(order.schedule.executionDeadline)) {
+        await this.expire(order)
+        throw new ConciergeError(
+          'NFT_SCHEDULE_WINDOW_CLOSED',
+          'The bounded scheduled-mint execution window has closed.',
+          409,
+        )
+      }
     }
     if (Date.parse(order.expiresAt) <= now) {
       await this.expire(order)
@@ -553,13 +729,45 @@ export class NftMintService {
       order.collectionSlug,
       order.nftContract,
       order.treasuryAddress,
+      { allowUpcoming: Boolean(order.schedule) },
     )
     this.dependencies.chain.validateMint(transaction, order.nftContract, order.treasuryAddress)
+    if (order.schedule) {
+      const currentSnapshotHash = digest(stableStageSnapshot(order.nftContract, transaction))
+      const stableStage = (
+        transaction.stage.startTime === order.schedule.stageStartTime
+        && transaction.stage.endTime === order.schedule.stageEndTime
+      )
+      if (!stableStage || currentSnapshotHash !== order.schedule.stageSnapshotHash) {
+        throw new ConciergeError(
+          'NFT_SCHEDULE_STAGE_DRIFT',
+          'The onchain public-stage configuration changed after reservation; execution is blocked.',
+          409,
+        )
+      }
+    }
     const mintValue = BigInt(transaction.valueWei)
     if (mintValue > BigInt(order.maxMintPriceWei)) {
       throw new ConciergeError('NFT_MINT_PRICE_LIMIT', 'Current mint price exceeds the customer mandate.', 409)
     }
-    const { mintGasLimit: gasLimit, maxFeePerGas } = await this.estimateExecution(transaction)
+    const { mintGasLimit: gasLimit, maxFeePerGas, maxPriorityFeePerGas } = await this.estimateExecution(
+      transaction,
+      Boolean(order.schedule && !transaction.stage.active),
+    )
+    if (order.schedule && maxFeePerGas > BigInt(order.schedule.maxFeePerGasWei)) {
+      throw new ConciergeError(
+        'NFT_SCHEDULE_GAS_LIMIT',
+        'Current maximum fee estimate exceeds the scheduled customer gas ceiling.',
+        409,
+      )
+    }
+    const boundedPriorityFeePerGas = order.schedule
+      ? (
+          maxPriorityFeePerGas > BigInt(order.schedule.maxPriorityFeePerGasWei)
+            ? BigInt(order.schedule.maxPriorityFeePerGasWei)
+            : maxPriorityFeePerGas
+        )
+      : maxPriorityFeePerGas
     const maximumExecutionCost = mintValue + maxFeePerGas * (
       gasLimit + this.dependencies.deliveryGasLimit + this.dependencies.refundGasLimit
     )
@@ -574,6 +782,9 @@ export class NftMintService {
     const expiresAt = new Date(Math.min(
       now + this.dependencies.planTtlSeconds * 1000,
       Date.parse(order.expiresAt),
+      order.schedule
+        ? Date.parse(order.schedule.executionDeadline)
+        : Number.POSITIVE_INFINITY,
     )).toISOString()
     const planCore = {
       orderId: order.orderId,
@@ -582,11 +793,13 @@ export class NftMintService {
       valueWei: transaction.valueWei,
       gasLimit: gasLimit.toString(),
       maxFeePerGasWei: maxFeePerGas.toString(),
+      maxPriorityFeePerGasWei: boundedPriorityFeePerGas.toString(),
       transactionNonce: transactionNonce.toString(),
       leaseOwner,
       leaseExpiresAt: expiresAt,
       executionAttempt: 1,
       maximumExecutionCostWei: maximumExecutionCost.toString(),
+      ...(order.schedule ? { notBefore: order.schedule.stageStartTime } : {}),
       expiresAt,
     }
     const expectedRevision = order.revision
@@ -609,7 +822,9 @@ export class NftMintService {
         valueWei: transaction.valueWei,
         gasLimit: gasLimit.toString(),
         maxFeePerGasWei: maxFeePerGas.toString(),
+        maxPriorityFeePerGasWei: boundedPriorityFeePerGas.toString(),
         nonce: transactionNonce.toString(),
+        ...(order.schedule ? { notBefore: order.schedule.stageStartTime } : {}),
       },
     }
   }
@@ -620,7 +835,7 @@ export class NftMintService {
     leaseOwnerRaw: string,
   ) {
     const order = await this.requireOrder(ownerId, externalId)
-    if (order.state === 'armed' && !order.executionPlan) {
+    if ((order.state === 'armed' || order.state === 'scheduled') && !order.executionPlan) {
       return { recovered: false, order: publicOrder(order) }
     }
     if (order.state !== 'minting' || !order.executionPlan || !order.deposit) {
@@ -658,7 +873,7 @@ export class NftMintService {
     const expectedRevision = order.revision
     const releasedPlanId = order.executionPlan.planId
     delete order.executionPlan
-    order.state = 'armed'
+    order.state = order.schedule ? 'scheduled' : 'armed'
     order.revision += 1
     order.updatedAt = new Date(now).toISOString()
     await this.dependencies.store.releaseExecutionLease(order, expectedRevision, 'mint')
@@ -694,6 +909,7 @@ export class NftMintService {
       throw new ConciergeError('NFT_MINT_CONFIRMING', 'Mint transaction has insufficient confirmations.', 409)
     }
     const expectedRevision = order.revision
+    const includedAt = new Date(mint.blockTimestamp * 1000).toISOString()
     order.state = 'delivering'
     order.mint = {
       transactionHash: mint.transactionHash,
@@ -701,6 +917,13 @@ export class NftMintService {
       blockNumber: mint.blockNumber.toString(),
       gasCostWei: mint.gasCostWei.toString(),
       transactionNonce: mint.nonce.toString(),
+      includedAt,
+      ...(order.schedule ? {
+        stageStartDelayMs: Math.max(
+          0,
+          mint.blockTimestamp * 1000 - Date.parse(order.schedule.stageStartTime),
+        ),
+      } : {}),
       confirmedAt: new Date(this.dependencies.now()).toISOString(),
     }
     order.revision += 1
@@ -781,7 +1004,12 @@ export class NftMintService {
         409,
       )
     }
-    if (order.state !== 'awaiting_funding' && order.state !== 'armed' && order.state !== 'failed') {
+    if (
+      order.state !== 'awaiting_funding'
+      && order.state !== 'armed'
+      && order.state !== 'scheduled'
+      && order.state !== 'failed'
+    ) {
       throw new ConciergeError('NFT_ORDER_STATE_INVALID', `Order cannot be cancelled while ${order.state}.`, 409)
     }
     const expectedRevision = order.revision
@@ -801,15 +1029,16 @@ export class NftMintService {
     }
     const now = this.dependencies.now()
     const leaseOwner = this.validateLeaseOwner(leaseOwnerRaw)
-    const [transaction, maxFeePerGas] = await Promise.all([
+    const [transaction, fees] = await Promise.all([
       this.dependencies.chain.prepareDelivery(
         order.nftContract,
         order.treasuryAddress,
         order.nftRecipient,
         BigInt(order.mint.tokenId),
       ),
-      this.dependencies.chain.maxFeePerGas(),
+      this.feeQuote(),
     ])
+    const { maxFeePerGas, maxPriorityFeePerGas } = fees
     const gasLimit = transaction.gasLimit * 120n / 100n
     if (gasLimit > this.dependencies.deliveryGasLimit) {
       throw new ConciergeError('NFT_DELIVERY_GAS_LIMIT', 'NFT delivery exceeds the reserved gas limit.', 409)
@@ -824,6 +1053,7 @@ export class NftMintService {
       valueWei: '0',
       gasLimit: gasLimit.toString(),
       maxFeePerGasWei: maxFeePerGas.toString(),
+      maxPriorityFeePerGasWei: maxPriorityFeePerGas.toString(),
       transactionNonce: transactionNonce.toString(),
       leaseOwner,
       leaseExpiresAt: expiresAt,
@@ -849,6 +1079,7 @@ export class NftMintService {
         valueWei: '0',
         gasLimit: gasLimit.toString(),
         maxFeePerGasWei: maxFeePerGas.toString(),
+        maxPriorityFeePerGasWei: maxPriorityFeePerGas.toString(),
         nonce: transactionNonce.toString(),
       },
     }
@@ -921,7 +1152,7 @@ export class NftMintService {
         409,
       )
     }
-    const maxFeePerGas = await this.dependencies.chain.maxFeePerGas()
+    const { maxFeePerGas, maxPriorityFeePerGas } = await this.feeQuote()
     const percentageBufferedFee = (maxFeePerGas * 120n + 99n) / 100n
     const bufferedMaxFeePerGas = percentageBufferedFee > MIN_ASSISTED_REFUND_MAX_FEE_PER_GAS_WEI
       ? percentageBufferedFee
@@ -957,6 +1188,11 @@ export class NftMintService {
       valueWei: amountWei.toString(),
       gasLimit: this.dependencies.refundGasLimit.toString(),
       maxFeePerGasWei: bufferedMaxFeePerGas.toString(),
+      maxPriorityFeePerGasWei: (
+        maxPriorityFeePerGas > bufferedMaxFeePerGas
+          ? bufferedMaxFeePerGas
+          : maxPriorityFeePerGas
+      ).toString(),
       transactionNonce: transactionNonce.toString(),
       leaseOwner,
       leaseExpiresAt: expiresAt,
@@ -984,6 +1220,11 @@ export class NftMintService {
         valueWei: amountWei.toString(),
         gasLimit: this.dependencies.refundGasLimit.toString(),
         maxFeePerGasWei: bufferedMaxFeePerGas.toString(),
+        maxPriorityFeePerGasWei: (
+          maxPriorityFeePerGas > bufferedMaxFeePerGas
+            ? bufferedMaxFeePerGas
+            : maxPriorityFeePerGas
+        ).toString(),
         nonce: transactionNonce.toString(),
       },
     }
@@ -1086,8 +1327,9 @@ export class NftMintService {
 
   private async estimateExecution(transaction: BuiltMintTransaction, allowGasFallback = false) {
     let maxFeePerGas: bigint
+    let maxPriorityFeePerGas: bigint
     try {
-      maxFeePerGas = await this.dependencies.chain.maxFeePerGas()
+      ({ maxFeePerGas, maxPriorityFeePerGas } = await this.feeQuote())
     } catch {
       throw new ConciergeError(
         'NFT_EXECUTION_ESTIMATE_UNAVAILABLE',
@@ -1103,6 +1345,7 @@ export class NftMintService {
       return {
         mintGasLimit: estimatedMintGas * 120n / 100n,
         maxFeePerGas,
+        maxPriorityFeePerGas,
         estimationMode: 'live-simulation' as const,
       }
     } catch {
@@ -1110,6 +1353,7 @@ export class NftMintService {
         return {
           mintGasLimit: PREVIEW_FALLBACK_MINT_GAS_LIMIT,
           maxFeePerGas,
+          maxPriorityFeePerGas,
           estimationMode: 'conservative-fallback' as const,
         }
       }
@@ -1118,6 +1362,19 @@ export class NftMintService {
         'Ethereum could not currently simulate the bounded mint from the execution treasury. No order or deposit was accepted.',
         503,
       )
+    }
+  }
+
+  private async feeQuote() {
+    const maxFeePerGas = await this.dependencies.chain.maxFeePerGas()
+    const estimatedPriority = this.dependencies.chain.maxPriorityFeePerGas
+      ? await this.dependencies.chain.maxPriorityFeePerGas()
+      : (maxFeePerGas < 2_000_000_000n ? maxFeePerGas : 2_000_000_000n)
+    return {
+      maxFeePerGas,
+      maxPriorityFeePerGas: estimatedPriority > maxFeePerGas
+        ? maxFeePerGas
+        : estimatedPriority,
     }
   }
 

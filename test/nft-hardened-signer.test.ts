@@ -137,6 +137,33 @@ test('isolated signer refuses a different plan that reuses the reserved nonce', 
   signer.close()
 })
 
+test('isolated signer cannot sign a scheduled mint before its bound stage start', async () => {
+  let broadcasts = 0
+  const backend: NftHardenedSignerBackend = {
+    async address() { return TREASURY },
+    async signAndBroadcast() {
+      broadcasts += 1
+      return { transactionHash: TRANSACTION_HASH }
+    },
+  }
+  const raw = response()
+  const notBefore = new Date(NOW + 10_000).toISOString()
+  const order = raw.execution.order as Record<string, unknown>
+  const plan = raw.execution.order.executionPlan as Record<string, unknown>
+  const transaction = raw.execution.transaction as Record<string, unknown>
+  order.schedule = { stageStartTime: notBefore }
+  plan.notBefore = notBefore
+  transaction.notBefore = notBefore
+  const directory = mkdtempSync(join(tmpdir(), 'pocket-nft-signer-schedule-'))
+  const signer = new NftHardenedSigner(join(directory, 'signer.sqlite'), backend, () => NOW)
+  await assert.rejects(
+    signer.execute(raw, constraints()),
+    (error: unknown) => (error as { code?: string }).code === 'NFT_SIGNER_TOO_EARLY',
+  )
+  assert.equal(broadcasts, 0)
+  signer.close()
+})
+
 test('isolated signer migrates legacy global nonce reservations to signer-scoped reservations', async () => {
   const directory = mkdtempSync(join(tmpdir(), 'pocket-nft-signer-migration-'))
   const databasePath = join(directory, 'signer.sqlite')

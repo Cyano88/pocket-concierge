@@ -1,8 +1,8 @@
 openapi: 3.1.0
 info:
   title: Pocket Concierge API
-  version: 0.4.0
-  description: Governed household errands and customer-funded Ethereum NFT mint delivery with verifiable receipts.
+  version: 0.5.0
+  description: Governed household errands, launch-scheduled Ethereum NFT mint delivery, and rights-aware wallpaper commerce.
 servers:
   - url: http://localhost:4310
 security:
@@ -342,6 +342,95 @@ paths:
       responses:
         "200":
           description: Refund verified; order finalized with complete purchase, delivery, and refund evidence
+  /v1/nft-mints/orders/{externalId}/wallpaper:
+    post:
+      operationId: createPrivateNftWallpaper
+      summary: Turn one verified delivered NFT into a private desktop and mobile wallpaper pack
+      security:
+        - orderToken: []
+      parameters:
+        - $ref: "#/components/parameters/ExternalId"
+      responses:
+        "201":
+          description: Deterministic private-use wallpaper pack with scoped download links and hashes
+        "200":
+          description: Idempotent replay of an existing wallpaper pack
+        "409":
+          description: NFT delivery is not verified or token metadata is not revealed yet
+  /v1/wallpapers:
+    get:
+      security: []
+      operationId: listPublicNftWallpapers
+      summary: Browse rights-reviewed NFT wallpaper previews for free
+      responses:
+        "200":
+          description: Public catalog with NFT provenance and reviewed rights references
+  /v1/wallpapers/{assetId}:
+    get:
+      security: []
+      operationId: getPublicNftWallpaper
+      parameters:
+        - in: path
+          name: assetId
+          required: true
+          schema: { type: string, pattern: "^nwa_[a-f0-9]{24}$" }
+      responses:
+        "200":
+          description: Public preview, provenance, and rights classification
+        "404":
+          description: Asset is not in the reviewed public catalog
+  /v1/wallpapers/{assetId}/download/{variant}:
+    get:
+      security: []
+      operationId: downloadNftWallpaper
+      parameters:
+        - in: path
+          name: assetId
+          required: true
+          schema: { type: string, pattern: "^nwa_[a-f0-9]{24}$" }
+        - in: path
+          name: variant
+          required: true
+          schema: { type: string, enum: [preview, desktop, mobile] }
+        - in: query
+          name: token
+          schema: { type: string }
+      responses:
+        "200":
+          description: Public preview or paid full-resolution PNG
+        "401":
+          description: Full-resolution download token is missing, invalid, or expired
+  /v1/okx/wallpapers/purchase:
+    post:
+      security: []
+      operationId: purchaseNftWallpaper
+      summary: Pay 0.01 USDT for one full-resolution rights-reviewed wallpaper bundle
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [assetId]
+              properties:
+                assetId:
+                  type: string
+                  pattern: "^nwa_[a-f0-9]{24}$"
+      responses:
+        "200":
+          description: Desktop/mobile downloads, file hashes, NFT provenance, and license receipt
+        "402":
+          description: 0.01-USDT exact EIP-3009 payment challenge on X Layer
+  /v1/wallpapers/catalog/from-order:
+    post:
+      operationId: reviewNftWallpaperForCatalog
+      summary: Internal operator review that promotes a private pack only with explicit commercial rights evidence
+      security:
+        - operatorKey: []
+      responses:
+        "201":
+          description: Wallpaper admitted to the public catalog
   /v1/errands:
     post:
       operationId: createErrand
@@ -635,6 +724,27 @@ components:
         expiresAt:
           type: string
           format: date-time
+        executionMode:
+          type: string
+          enum: [immediate, scheduled]
+          default: immediate
+        executionWindowSeconds:
+          type: integer
+          minimum: 30
+          maximum: 1800
+          description: Scheduled public-stage execution window after the onchain stage start
+        maxFeePerGasWei:
+          type: string
+          pattern: "^[1-9][0-9]*$"
+          description: Required EIP-1559 total fee ceiling for scheduled execution
+        maxPriorityFeePerGasWei:
+          type: string
+          pattern: "^[1-9][0-9]*$"
+          description: Required EIP-1559 priority-fee ceiling for scheduled execution
+        maxReplacementAttempts:
+          type: integer
+          const: 0
+          description: Replacement transactions are disabled until same-nonce recovery is independently proven
     TransactionHashInput:
       type: object
       additionalProperties: false

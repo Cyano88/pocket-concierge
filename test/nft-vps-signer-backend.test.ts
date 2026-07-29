@@ -22,6 +22,7 @@ function plan(): ValidatedAssistedPlan {
       valueWei: '12345',
       gasLimit: '21000',
       maxFeePerGasWei: '2000000000',
+      maxPriorityFeePerGasWei: '500000000',
       nonce: '17',
     },
   }
@@ -45,13 +46,14 @@ test('VPS signer broadcasts only the exact nonce-bound Ethereum envelope', async
 
   const transaction = Transaction.from(serialized)
   assert.equal(transaction.from, wallet.address)
-  assert.equal(transaction.type, 0)
+  assert.equal(transaction.type, 2)
   assert.equal(transaction.chainId, 1n)
   assert.equal(transaction.nonce, 17)
   assert.equal(transaction.to, plan().transaction.to)
   assert.equal(transaction.value, 12345n)
   assert.equal(transaction.gasLimit, 21000n)
-  assert.equal(transaction.gasPrice, 2000000000n)
+  assert.equal(transaction.maxFeePerGas, 2000000000n)
+  assert.equal(transaction.maxPriorityFeePerGas, 500000000n)
   assert.equal(transaction.data, '0x')
 })
 

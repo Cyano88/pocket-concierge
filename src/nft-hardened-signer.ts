@@ -44,6 +44,7 @@ export class NftHardenedSigner {
         value_wei TEXT NOT NULL,
         gas_limit TEXT NOT NULL,
         max_fee_per_gas_wei TEXT NOT NULL,
+        max_priority_fee_per_gas_wei TEXT NOT NULL DEFAULT '0',
         expires_at TEXT NOT NULL,
         state TEXT NOT NULL,
         transaction_hash TEXT,
@@ -52,6 +53,19 @@ export class NftHardenedSigner {
         UNIQUE (signer_address, transaction_nonce)
       );
     `)
+    this.ensureAuthorizationColumns()
+  }
+
+  private ensureAuthorizationColumns() {
+    const columns = this.database.prepare(
+      `PRAGMA table_info(nft_signer_authorizations)`,
+    ).all() as Array<{ name: string }>
+    if (!columns.some(column => column.name === 'max_priority_fee_per_gas_wei')) {
+      this.database.exec(`
+        ALTER TABLE nft_signer_authorizations
+        ADD COLUMN max_priority_fee_per_gas_wei TEXT NOT NULL DEFAULT '0';
+      `)
+    }
   }
 
   private migrateLegacyAuthorizationSchema() {
@@ -113,6 +127,13 @@ export class NftHardenedSigner {
 
   async execute(raw: unknown, constraints: AssistedPlanConstraints) {
     const plan = validateAssistedNftPlan(raw, { ...constraints, now: this.now() })
+    if (plan.notBefore && this.now() < Date.parse(plan.notBefore)) {
+      throw new ConciergeError(
+        'NFT_SIGNER_TOO_EARLY',
+        `Signer authorization is locked until ${plan.notBefore}.`,
+        409,
+      )
+    }
     const signerAddress = getAddress(await this.backend.address())
     if (signerAddress !== plan.transaction.from) {
       throw new ConciergeError(
@@ -210,8 +231,8 @@ export class NftHardenedSigner {
         INSERT INTO nft_signer_authorizations (
           plan_id, external_id, action, chain_id, signer_address, transaction_nonce,
           target, calldata_hash, value_wei, gas_limit, max_fee_per_gas_wei,
-          expires_at, state, reserved_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?)
+          max_priority_fee_per_gas_wei, expires_at, state, reserved_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved', ?)
       `).run(
         plan.planId,
         plan.externalId,
@@ -224,6 +245,7 @@ export class NftHardenedSigner {
         plan.transaction.valueWei,
         plan.transaction.gasLimit,
         plan.transaction.maxFeePerGasWei,
+        plan.transaction.maxPriorityFeePerGasWei,
         plan.expiresAt,
         reservedAt,
       )

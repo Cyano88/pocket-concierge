@@ -1,4 +1,5 @@
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http'
+import { dirname, join } from 'node:path'
 import { getAddress, isAddress } from 'viem'
 import { authenticate, parseAgentKeys } from './auth.js'
 import {
@@ -24,6 +25,12 @@ import {
 } from './nft-mints.js'
 import { MemoryNftMintStore, SqliteNftMintStore } from './nft-store.js'
 import { requireSecret } from './secret-gate.js'
+import {
+  WALLPAPER_PURCHASE_FEE_ATOMIC,
+  WALLPAPER_PURCHASE_OUTPUT_SCHEMA,
+  WALLPAPER_PURCHASE_ROUTE,
+  WallpaperService,
+} from './wallpapers.js'
 
 const PORT = Number(process.env.PORT || 4310)
 const keys = parseAgentKeys(process.env.POCKET_CONCIERGE_AGENT_KEYS)
@@ -144,6 +151,13 @@ const nftService = nftConfigComplete
         10,
         600,
       ),
+      schedulePrepareLeadSeconds: configuredInteger(
+        process.env.POCKET_CONCIERGE_NFT_SCHEDULE_PREPARE_LEAD_SECONDS,
+        30,
+        'POCKET_CONCIERGE_NFT_SCHEDULE_PREPARE_LEAD_SECONDS',
+        5,
+        120,
+      ),
       deliveryGasLimit: configuredBigInt(
         process.env.POCKET_CONCIERGE_NFT_DELIVERY_GAS_LIMIT,
         '120000',
@@ -177,6 +191,31 @@ const nftOrderProtector = nftConfigComplete && paidRouteConfig
       outputSchema: NFT_MINT_ORDER_OUTPUT_SCHEMA,
     })
   : null
+const wallpaperDownloadSecret = String(
+  process.env.POCKET_CONCIERGE_WALLPAPER_DOWNLOAD_SECRET || nftOrderTokenSecret,
+).trim()
+const wallpaperService = nftConfigComplete && wallpaperDownloadSecret.length >= 32
+  ? new WallpaperService(
+      databasePath,
+      nftRpcUrl,
+      String(
+        process.env.POCKET_CONCIERGE_WALLPAPER_DIRECTORY
+        || join(dirname(databasePath), 'wallpapers'),
+      ),
+      wallpaperDownloadSecret,
+    )
+  : null
+const wallpaperPurchaseProtector = wallpaperService && paidRouteConfig
+  ? new OkxPaidRouteProtector(paidRouteConfig, {
+      method: 'POST',
+      path: WALLPAPER_PURCHASE_ROUTE,
+      amountAtomic: WALLPAPER_PURCHASE_FEE_ATOMIC,
+      description: 'Purchase one rights-reviewed NFT wallpaper bundle with provenance, license receipt, and file hashes.',
+      serviceName: 'Pocket NFT Wallpaper',
+      tags: ['nft', 'wallpaper', 'provenance', 'license', 'download'],
+      outputSchema: WALLPAPER_PURCHASE_OUTPUT_SCHEMA,
+    })
+  : null
 const service = new ConciergeService({
   store: databasePath ? new SqliteMissionStore(databasePath) : new MemoryMissionStore(),
   now: () => Date.now(),
@@ -189,6 +228,15 @@ function json(res: ServerResponse, status: number, responseBody: unknown, header
   res.setHeader('Content-Type', 'application/json; charset=utf-8')
   res.setHeader('Cache-Control', 'no-store')
   res.end(JSON.stringify(responseBody))
+}
+
+function png(res: ServerResponse, value: Buffer) {
+  res.statusCode = 200
+  res.setHeader('Content-Type', 'image/png')
+  res.setHeader('Content-Length', value.length)
+  res.setHeader('Cache-Control', 'private, max-age=300')
+  res.setHeader('X-Content-Type-Options', 'nosniff')
+  res.end(value)
 }
 
 async function sendResponse(res: ServerResponse, response: Response) {
@@ -370,6 +418,113 @@ const server = createServer(async (req, res) => {
         ),
       })
     }
+    if (method === 'GET' && url.pathname === '/v1/wallpapers') {
+      if (!wallpaperService) throw new ConciergeError('WALLPAPER_NOT_CONFIGURED', 'NFT wallpaper service is disabled.', 503)
+      return json(res, 200, { ok: true, assets: wallpaperService.listPublic() })
+    }
+    const wallpaperItemMatch = url.pathname.match(/^\/v1\/wallpapers\/(nwa_[a-f0-9]{24})$/)
+    if (method === 'GET' && wallpaperItemMatch?.[1]) {
+      if (!wallpaperService) throw new ConciergeError('WALLPAPER_NOT_CONFIGURED', 'NFT wallpaper service is disabled.', 503)
+      const asset = wallpaperService.getPublic(wallpaperItemMatch[1])
+      if (!asset) throw new ConciergeError('WALLPAPER_NOT_FOUND', 'Public wallpaper asset was not found.', 404)
+      return json(res, 200, { ok: true, asset })
+    }
+    const wallpaperDownloadMatch = url.pathname.match(
+      /^\/v1\/wallpapers\/(nwa_[a-f0-9]{24})\/download\/(preview|desktop|mobile)$/,
+    )
+    if (method === 'GET' && wallpaperDownloadMatch?.[1] && wallpaperDownloadMatch[2]) {
+      if (!wallpaperService) throw new ConciergeError('WALLPAPER_NOT_CONFIGURED', 'NFT wallpaper service is disabled.', 503)
+      return png(
+        res,
+        await wallpaperService.download(
+          wallpaperDownloadMatch[1],
+          wallpaperDownloadMatch[2] as 'preview' | 'desktop' | 'mobile',
+          url.searchParams.get('token') ?? undefined,
+        ),
+      )
+    }
+    if (method === 'POST' && url.pathname === WALLPAPER_PURCHASE_ROUTE) {
+      if (!wallpaperService || !wallpaperPurchaseProtector) {
+        throw new ConciergeError('WALLPAPER_NOT_CONFIGURED', 'Paid NFT wallpaper service is disabled.', 503)
+      }
+      const requestBody = await body(req)
+      const assetId = (
+        requestBody && typeof requestBody === 'object' && !Array.isArray(requestBody)
+          ? (requestBody as Record<string, unknown>).assetId
+          : undefined
+      )
+      if (typeof assetId !== 'string' || !wallpaperService.getPublic(assetId)) {
+        throw new ConciergeError('WALLPAPER_NOT_FOUND', 'Public wallpaper asset was not found.', 404)
+      }
+      const payment = await wallpaperPurchaseProtector.protect(new Request(`${publicUrl}${url.pathname}`, {
+        method: 'POST',
+        headers: fetchHeaders(req),
+      }), requestBody)
+      if (payment.status === 'challenge') return sendResponse(res, payment.response)
+      return json(res, 200, wallpaperService.purchase(assetId), payment.headers)
+    }
+    const wallpaperCreateMatch = url.pathname.match(
+      /^\/v1\/nft-mints\/orders\/([^/]+)\/wallpaper$/,
+    )
+    if (method === 'POST' && wallpaperCreateMatch?.[1]) {
+      if (!nftService || !wallpaperService) {
+        throw new ConciergeError('WALLPAPER_NOT_CONFIGURED', 'NFT wallpaper service is disabled.', 503)
+      }
+      const externalId = decodeURIComponent(wallpaperCreateMatch[1])
+      const order = await nftService.authenticateOrder(
+        'okx-marketplace',
+        externalId,
+        req.headers['x-order-token'] as string | undefined ?? bearer(req.headers.authorization),
+      )
+      if (!order.mint || !order.delivery || !['delivered', 'refunding', 'refunded'].includes(order.state)) {
+        throw new ConciergeError('WALLPAPER_NFT_NOT_DELIVERED', 'A verified delivered NFT is required before wallpaper creation.', 409)
+      }
+      const created = await wallpaperService.create(
+        externalId,
+        order.nftContract,
+        order.mint.tokenId,
+        { rights: 'private-use' },
+      )
+      return json(res, created.replayed ? 200 : 201, {
+        ok: true,
+        replayed: created.replayed,
+        asset: created.asset,
+        downloads: wallpaperService.grant(created.asset.assetId),
+        rightsBoundary: 'Private-use pack only. NFT ownership does not grant public resale rights.',
+      })
+    }
+    if (method === 'POST' && url.pathname === '/v1/wallpapers/catalog/from-order') {
+      if (!nftService || !wallpaperService) {
+        throw new ConciergeError('WALLPAPER_NOT_CONFIGURED', 'NFT wallpaper service is disabled.', 503)
+      }
+      requireNftOperator(req.headers['x-operator-key'] as string | undefined)
+      const requestBody = await body(req)
+      const input = requestBody && typeof requestBody === 'object' && !Array.isArray(requestBody)
+        ? requestBody as Record<string, unknown>
+        : {}
+      if (typeof input.externalId !== 'string') {
+        throw new ConciergeError('WALLPAPER_INPUT_INVALID', 'externalId is required.')
+      }
+      const order = await nftService.get('okx-marketplace', input.externalId)
+      if (!order.mint || !order.delivery || !['delivered', 'refunding', 'refunded'].includes(order.state)) {
+        throw new ConciergeError('WALLPAPER_NFT_NOT_DELIVERED', 'A verified delivered NFT is required before catalog review.', 409)
+      }
+      const created = await wallpaperService.create(
+        input.externalId,
+        order.nftContract,
+        order.mint.tokenId,
+        { rights: 'private-use' },
+      )
+      const asset = wallpaperService.promote(input.externalId, {
+        rights: input.rights,
+        rightsReference: input.rightsReference,
+      })
+      return json(res, created.replayed ? 200 : 201, {
+        ok: true,
+        replayed: created.replayed,
+        asset,
+      })
+    }
     const receiptMatch = url.pathname.match(/^\/v1\/authority\/receipts\/(pr_[a-f0-9]{32})$/)
     if (method === 'GET' && receiptMatch?.[1]) {
       return json(res, 200, { ok: true, receipt: await service.getReceipt(receiptMatch[1]) })
@@ -404,6 +559,14 @@ const server = createServer(async (req, res) => {
           serviceFee: '1 USDT on X Layer',
           executionCapital: 'Customer deposits native ETH on Ethereum before the order is armed.',
           custody: 'Pocket temporarily holds execution ETH and the minted NFT until delivery.',
+          execution: 'Immediate or launch-scheduled public SeaDrop mint with bounded EIP-1559 fees; no guaranteed snipe.',
+        },
+        nftWallpaper: {
+          status: wallpaperService ? 'enabled' : 'disabled',
+          privatePack: 'Verified delivered NFTs can become private desktop and mobile wallpaper packs.',
+          publicCatalog: 'Only operator-reviewed commercial rights enter the paid catalog.',
+          catalog: '/v1/wallpapers',
+          paidPurchase: WALLPAPER_PURCHASE_ROUTE,
         },
       })
     }
@@ -427,7 +590,22 @@ const server = createServer(async (req, res) => {
           verifiedPilotProof: nftDemoExternalId && nftDemoServicePaymentTx
             ? NFT_MINT_PUBLIC_PROOF_ROUTE
             : null,
-          supported: ['ethereum-mainnet', 'opensea-seadrop', 'public-fcfs', 'quantity-1'],
+          supported: [
+            'ethereum-mainnet',
+            'opensea-seadrop',
+            'public-fcfs',
+            'launch-scheduled',
+            'eip-1559-bounded',
+            'quantity-1',
+          ],
+          unsupported: ['allowlist', 'presale-signature', 'arbitrary-calldata', 'replacement-transaction'],
+        },
+        nftWallpaper: {
+          enabled: Boolean(wallpaperService),
+          privatePack: '/v1/nft-mints/orders/{externalId}/wallpaper',
+          publicCatalog: '/v1/wallpapers',
+          paidPurchase: WALLPAPER_PURCHASE_ROUTE,
+          rightsBoundary: 'Public catalog requires reviewed CC0, public-domain, commercial-license, or creator opt-in evidence.',
         },
         idempotency: 'externalId + cycleId',
         privacy: 'Send only opaque privateInputRef values; the buyer executor keeps customer references locally.',
