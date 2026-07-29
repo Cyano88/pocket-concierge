@@ -101,6 +101,37 @@ key, worker ID, signer database, fee ceiling and Ethereum RPC variables. Do not 
 `export`: systemd's `EnvironmentFile` accepts `NAME=value` assignments and silently ignores shell
 export statements.
 
+### Rotate a worker signer
+
+If a worker authorization key is exposed, disable the continuous worker and rotate the Privy app
+secret before proceeding. Create a new constrained worker key, but keep the policy administrator
+owner unchanged. The rotation command preserves the wallet address and global policy, requires the
+policy administrator authorization key only for the signed update, and refuses unexpected signer
+state.
+
+First run the read-only plan:
+
+```bash
+export POCKET_CONCIERGE_NFT_PRIVY_EXPECTED_OLD_WORKER_SIGNER_ID='<old-worker-id>'
+export POCKET_CONCIERGE_NFT_PRIVY_NEW_WORKER_SIGNER_ID='<new-worker-id>'
+npm run nft:privy-rotate-worker
+```
+
+After reviewing the exact IDs, load the policy administrator key without echoing it or storing it
+in shell history, then apply the same plan:
+
+```bash
+read -rsp 'Policy administrator authorization key: ' \
+  POCKET_CONCIERGE_NFT_PRIVY_ADMIN_AUTHORIZATION_PRIVATE_KEY
+echo
+export POCKET_CONCIERGE_NFT_PRIVY_ADMIN_AUTHORIZATION_PRIVATE_KEY
+npm run nft:privy-rotate-worker -- --apply --confirm-wallet '<treasury-address>'
+unset POCKET_CONCIERGE_NFT_PRIVY_ADMIN_AUTHORIZATION_PRIVATE_KEY
+```
+
+Only after the wallet update succeeds should the worker environment be changed to the new worker
+authorization private key and the old worker key be deleted in Privy.
+
 Before changing the API treasury, verify the live wallet ownership, signer override, policy denial
 and sign-only path. This creates no broadcast and uses a deliberately unreachable nonce:
 
