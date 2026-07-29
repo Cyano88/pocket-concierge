@@ -4,6 +4,10 @@ import {
   normalizePrivyPublicKey,
 } from '../src/privy-authorization-key.js'
 
+// Key-quorum deletion can take longer than ordinary wallet requests inside Privy.
+// This expiry applies only to the exact, confirmed deletion request below.
+const DELETION_REQUEST_EXPIRY_MS = 180_000
+
 function requiredEnv(name: string) {
   const value = String(process.env[name] || '').trim()
   if (!value) throw new Error(`${name} is required.`)
@@ -34,7 +38,7 @@ async function main() {
   const client = new PrivyClient({
     appId,
     appSecret,
-    requestExpiry: { defaultMs: 30_000 },
+    requestExpiry: { defaultMs: DELETION_REQUEST_EXPIRY_MS },
   })
   const targetQuorum = await client.keyQuorums().get(retiredSignerId)
   const derivedPublicKey = derivePrivyAuthorizationPublicKey(retiredAuthorizationKey)
@@ -96,7 +100,7 @@ async function main() {
     authorization_context: {
       authorization_private_keys: [retiredAuthorizationKey],
     },
-    request_expiry: Date.now() + 30_000,
+    request_expiry: Date.now() + DELETION_REQUEST_EXPIRY_MS,
   })
   console.log(JSON.stringify({
     ok: true,
