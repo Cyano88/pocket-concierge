@@ -82,28 +82,32 @@ for each immutable customer order.
 Add these values to `/opt/pocket-signer/secrets/worker.env`. The authorization private key is the
 base64-encoded PKCS8 key Privy provides for request authorization; it is not the wallet private key.
 
-```bash
-export POCKET_CONCIERGE_NFT_SIGNER_MODE='privy'
-export POCKET_CONCIERGE_NFT_AUTO_EXECUTE='false'
-export POCKET_CONCIERGE_NFT_PRIVY_APP_ID='<separate-pocket-app-id>'
-export POCKET_CONCIERGE_NFT_PRIVY_APP_SECRET='<app-secret>'
-export POCKET_CONCIERGE_NFT_PRIVY_WALLET_ID='<wallet-id>'
-export POCKET_CONCIERGE_NFT_PRIVY_AUTHORIZATION_PRIVATE_KEY='<base64-pkcs8-key>'
-export POCKET_CONCIERGE_NFT_PRIVY_POLICY_ID='<attached-owned-policy-id>'
-export POCKET_CONCIERGE_NFT_PRIVY_ADMIN_OWNER_ID='<offline-admin-owner-id>'
-export POCKET_CONCIERGE_NFT_PRIVY_POLICY_CONFIRMED='true'
-export POCKET_CONCIERGE_NFT_TREASURY_ADDRESS='<new-managed-wallet-address>'
-export POCKET_CONCIERGE_NFT_POLL_INTERVAL_MS='15000'
+```dotenv
+POCKET_CONCIERGE_NFT_SIGNER_MODE=privy
+POCKET_CONCIERGE_NFT_AUTO_EXECUTE=false
+POCKET_CONCIERGE_NFT_PRIVY_APP_ID=<separate-pocket-app-id>
+POCKET_CONCIERGE_NFT_PRIVY_APP_SECRET=<app-secret>
+POCKET_CONCIERGE_NFT_PRIVY_WALLET_ID=<wallet-id>
+POCKET_CONCIERGE_NFT_PRIVY_AUTHORIZATION_PRIVATE_KEY=<base64-pkcs8-key>
+POCKET_CONCIERGE_NFT_PRIVY_POLICY_ID=<attached-owned-policy-id>
+POCKET_CONCIERGE_NFT_PRIVY_ADMIN_OWNER_ID=<offline-admin-owner-id>
+POCKET_CONCIERGE_NFT_PRIVY_POLICY_CONFIRMED=true
+POCKET_CONCIERGE_NFT_TREASURY_ADDRESS=<new-managed-wallet-address>
+POCKET_CONCIERGE_NFT_POLL_INTERVAL_MS=15000
 ```
 
 Keep the file owned by `pocketsigner` with mode `600`. Keep the existing Pocket API URL, operator
-key, worker ID, signer database, fee ceiling and Ethereum RPC variables.
+key, worker ID, signer database, fee ceiling and Ethereum RPC variables. Do not prefix entries with
+`export`: systemd's `EnvironmentFile` accepts `NAME=value` assignments and silently ignores shell
+export statements.
 
 Before changing the API treasury, verify the live wallet ownership, signer override, policy denial
 and sign-only path. This creates no broadcast and uses a deliberately unreachable nonce:
 
 ```bash
+set -a
 source /opt/pocket-signer/secrets/worker.env
+set +a
 npm run nft:privy-policy-check
 ```
 
@@ -119,7 +123,9 @@ npm run nft:privy-policy-check
 8. Run one queue cycle:
 
    ```bash
+   set -a
    source /opt/pocket-signer/secrets/worker.env
+   set +a
    cd /opt/pocket-signer/app
    npm run nft:managed-daemon -- --once
    ```
