@@ -2,6 +2,12 @@
 
 Pocket Concierge is a deterministic authority and buyer-agent orchestrator for household missions.
 
+## GIWA Pocket Mandates
+
+The GIWA-native smart-contract package lives in [`giwa-contracts/`](./giwa-contracts). `GiwaMandateExecutor` turns Pocket's deterministic authority model into a non-custodial ERC-20 execution boundary with fixed recipients, per-payment and total caps, activation and expiry windows, interval controls, exact one-time exceptions, replay protection, pause/revoke controls, and auditable payment events.
+
+The package targets GIWA Sepolia (`91342`) and includes its own Hardhat configuration, deployment module, verification configuration, and contract tests. Deployment details and the verified explorer address belong in [`giwa-contracts/README.md`](./giwa-contracts/README.md) after the testnet transaction is confirmed.
+
 The simple integration surface is:
 
 - `POST /v1/okx/authority-check` — reusable 0.01-USDT purchase decision with a self-contained, independently recomputable SHA-256 proof.

@@ -1,0 +1,22 @@
+{
+  "name": "pocket-giwa-mandates",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "deploy:giwa": "hardhat ignition deploy ignition/modules/GiwaMandateExecutor.ts --network giwaSepolia --deployment-id giwa-sepolia",
+    "verify:giwa": "hardhat verify --network giwaSepolia"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.4.0",
+    "dotenv": "^17.2.1"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox-viem": "^5.0.1",
+    "@nomicfoundation/hardhat-verify": "^3.0.4",
+    "hardhat": "^3.0.4",
+    "typescript": "^5.9.2"
+  }
+}
